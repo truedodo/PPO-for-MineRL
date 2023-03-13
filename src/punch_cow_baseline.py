@@ -20,6 +20,22 @@ sys.path.insert(0, "vpt")  # nopep8
 
 from agent import MineRLAgent  # nopep8
 
+
+def safe_reset(env):
+    """
+    Helper function that runs `env.reset()` until it succeeds
+    """
+    try:
+        obs = env.reset()
+
+    except Exception as e:
+        print("🛑 Caught game crash! Trying again\n")
+        return safe_reset(env)
+
+    else:
+        return obs
+
+
 damages = []
 for i in range(1, 4):
 
@@ -39,14 +55,17 @@ for i in range(1, 4):
                         pi_head_kwargs=pi_head_kwargs)
     agent.load_weights(weights)
 
-    n_trials = 300
+    n_trials = 100
 
     damages.append([])
 
     for k in range(n_trials):
         start = datetime.now()
         print(f"🚩 Starting trial {k+1}/{n_trials} for model {i}x")
-        obs = env.reset()
+
+        reset_status = False
+
+        obs = safe_reset(env)
 
         done = False
 
@@ -61,7 +80,7 @@ for i in range(1, 4):
         dmg = obs["damage_dealt"]["damage_dealt"]
 
         print(
-            f"🏁 Finished  with {dmg} damage (time: {datetime.now() - start})")
+            f"🏁 Finished  with {dmg} damage (time: {datetime.now() - start})\n")
 
         damages[i-1].append(dmg)
 
@@ -77,3 +96,10 @@ for i in range(1, 4):
 plt.legend(loc='upper right')
 plt.savefig("damage.png")
 plt.show()
+
+for i in range(1, 4):
+    print(f"foundation-{i}x:")
+    print(f"  {np.mean(damages[i-1])} avg damage")
+    print(f"  {np.std(damages[i-1])} std damage\n")
+
+print("All done 🎉")
