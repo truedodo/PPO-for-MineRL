@@ -55,7 +55,7 @@ for i in range(1, 4):
                         pi_head_kwargs=pi_head_kwargs)
     agent.load_weights(weights)
 
-    n_trials = 100
+    n_trials = 75
 
     damages.append([])
 
