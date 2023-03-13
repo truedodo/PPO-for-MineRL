@@ -1,2 +1,3 @@
-# battle-craft-rl
- Feisty Minecraft bot
+<h1 align="center">
+BattleCraftRL
+</h1>
