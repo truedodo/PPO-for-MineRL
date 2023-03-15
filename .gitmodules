@@ -1,6 +1,4 @@
 [submodule "vpt"]
 	path = vpt
 	url = https://github.com/jhsul/Video-Pre-Training
-[submodule "ppg"]
-	path = ppg
-	url = https://github.com/jhsul/phasic-policy-gradient
+

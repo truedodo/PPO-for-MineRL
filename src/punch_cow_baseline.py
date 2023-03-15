@@ -18,7 +18,7 @@ import matplotlib.pyplot as plt
 import sys  # nopep8
 sys.path.insert(0, "vpt")  # nopep8
 
-from agent import MineRLAgent  # nopep8
+from vpt.agent import MineRLAgent  # nopep8
 
 
 def safe_reset(env):
@@ -39,7 +39,7 @@ def safe_reset(env):
 damages = []
 for i in range(1, 4):
 
-    env = gym.make("MineRLPunchCow-v0")
+    env = gym.make("MineRLEnderdragon-v0")
 
     model = f"models/foundation-model-{i}x.model"
     weights = f"weights/foundation-model-{i}x.weights"

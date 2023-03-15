@@ -51,7 +51,8 @@ agent.load_weights(weights)
 obs = safe_reset(env)
 done = False
 
-damage = 0
+damage_dealt = 0
+damage_taken = 0
 
 while not done:
     action = agent.get_action(obs)
@@ -59,12 +60,17 @@ while not done:
     obs, reward, done, info = env.step(action)
     env.render()
 
-    _damage = int(obs["damage_dealt"]["damage_dealt"])
-    if _damage > damage:
-        print(f"Damage dealt! ({_damage - damage})")
-        damage = _damage
+    _damage_dealt = int(obs["damage_dealt"]["damage_dealt"])
+    _damage_taken = int(obs["damage_taken"]["damage_taken"])
+    if _damage_dealt > damage_dealt:
+        print(f"Damage dealt! ({_damage_dealt - damage_dealt})")
+        damage_dealt = _damage_dealt
+
+    if _damage_taken > damage_taken:
+        print(f"Damage taken! ({_damage_taken - damage_taken})")
+        damage_taken = _damage_taken
 
 
-print(f"Total damage dealt: {damage}")
+print(f"Total damage dealt: {damage_dealt}")
 
 env.close()
