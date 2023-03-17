@@ -40,7 +40,9 @@ env = gym.make("MineRLPunchCow-v0")
 model = f"models/foundation-model-2x.model"
 weights = f"weights/foundation-model-2x.weights"
 agent_parameters = pickle.load(open(model, "rb"))
-# pprint(agent_parameters)
+
+pprint(agent_parameters)
+
 policy_kwargs = agent_parameters["model"]["args"]["net"]["args"]
 pi_head_kwargs = agent_parameters["model"]["args"]["pi_head_opts"]
 pi_head_kwargs["temperature"] = float(pi_head_kwargs["temperature"])
