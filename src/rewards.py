@@ -1,4 +1,5 @@
 
+# These are stats returned from the minerl environment
 stat_names = [
     "damage_dealt",
     "damage_taken",
