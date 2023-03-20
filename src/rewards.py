@@ -24,7 +24,7 @@ class RewardsCalculator:
             # BUT TREAT IT LIKE A TUPLE!!!!
             self.stats[k] = [v, 0]
 
-    def get_rewards(self, obs):
+    def get_rewards(self, obs, verbose=False):
 
         rewards = []
 
@@ -35,10 +35,18 @@ class RewardsCalculator:
                 # Reward is the amount of change to each stat
                 rewards.append((curr - v[1]) * v[0])
 
+                if verbose:
+                    print(f"{k}: {curr - v[1]}")
+
                 # Update the current value
                 v[1] = curr
 
-        return sum(rewards)
+        reward = sum(rewards)
+
+        if verbose and reward != 0:
+            print(f"Total reward: {reward}")
+
+        return reward
 
 
 if __name__ == "__main__":

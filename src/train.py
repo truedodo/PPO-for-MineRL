@@ -30,7 +30,9 @@ import matplotlib.pyplot as plt
 # coloredlogs.install(logging.DEBUG)
 # logging.basicConfig(level=logging.DEBUG)
 
-import sys  # nopep8
+import sys
+
+from rewards import RewardsCalculator  # nopep8
 sys.path.insert(0, "vpt")  # nopep8
 
 from agent import MineRLAgent  # nopep8
@@ -90,6 +92,8 @@ class PhasicPolicyGradient():
             model_path: str,
             weights_path: str,
 
+            rc: RewardsCalculator,
+
             # Hyperparameters
             epochs: int = 8,
             epochs_aux: int = 8,
@@ -99,6 +103,8 @@ class PhasicPolicyGradient():
 
     ):
         self.env = gym.make(env_name)
+
+        self.rc = rc
 
         agent_parameters = pickle.load(open(model_path, "rb"))
         policy_kwargs = agent_parameters["model"]["args"]["net"]["args"]
@@ -110,9 +116,9 @@ class PhasicPolicyGradient():
         self.agent.load_weights(weights_path)
 
         # Just so we can access these in a cleaner way
-        # self.base = self.agent.policy.net
-        # self.actor = self.agent.policy.pi_head
-        # self.critic = self.agent.policy.value_head
+        self.base = self.agent.policy.net
+        self.actor = self.agent.policy.pi_head
+        self.critic = self.agent.policy.value_head
 
         # Use Adam for both actor and critic
         # self.opt_actor = Adam(self.actor.parameters(), lr=lr, betas=betas)
@@ -185,10 +191,15 @@ class PhasicPolicyGradient():
 
 
 def main():
+    rc = RewardsCalculator(
+        damage_dealt=1,
+        damage_taken=20,
+    )
     ppg = PhasicPolicyGradient(
         "MineRLPunchCow-v0",
         "models/foundation-model-2x.model",
-        "weights/foundation-model-2x.weights")
+        "weights/foundation-model-2x.weights",
+        rc)
 
     num_episodes = 10
     eps_per_learn = 1
@@ -205,7 +216,7 @@ def main():
         ppg.agent.reset()
         damage_dealt = 0
 
-        initial_state = policy.initial_state(1)
+        state = policy.initial_state(1)
         dummy_first = th.from_numpy(np.array((False,))).to(device)
 
         done = False
@@ -215,9 +226,9 @@ def main():
 
             # Run the full model to get both heads and the
             # new hidden state
-            pi_distribution, v_prediction, new_agent_state = policy.get_output_for_observation(
+            pi_distribution, v_prediction, state = policy.get_output_for_observation(
                 agent_obs,
-                initial_state,
+                state,
                 dummy_first
             )
 
@@ -240,17 +251,7 @@ def main():
             obs, reward, done, info = ppg.env.step(minerl_action)
 
             # Immediately disregard the reward function from the environment
-            reward = 0
-
-            # Use the damage_dealt instead (TODO: generalize this)
-            _damage_dealt = int(obs["damage_dealt"]["damage_dealt"])
-
-            if _damage_dealt > damage_dealt:
-                # Reward is the amount of new damage dealt
-                # This is important because headshots are worth more!
-                reward = (damage_dealt - _damage_dealt)
-                print(f"🎉 Reward: {reward}")
-                damage_dealt = _damage_dealt
+            reward = rc.get_rewards(obs, True)
 
             memory = Memory(agent_obs, action, action_log_prob,
                             reward, done, v_prediction)
@@ -262,7 +263,7 @@ def main():
         # Do this at the end of each episode
         # TODO: pool multiple episodes and do this every 5 episodes or so
         # NOT SURE IF agent_obs IS CORRECT HERE, NEED TO PUT SOMETHING
-        ppg.learn(agent_obs)
+        # ppg.learn(agent_obs)
         ppg.memories.clear()
 
     ppg.env.close()
