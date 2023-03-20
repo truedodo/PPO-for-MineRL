@@ -214,7 +214,6 @@ def main():
         # Reset the initial state
         # This may be redundant, but better to be safe
         ppg.agent.reset()
-        damage_dealt = 0
 
         state = policy.initial_state(1)
         dummy_first = th.from_numpy(np.array((False,))).to(device)
