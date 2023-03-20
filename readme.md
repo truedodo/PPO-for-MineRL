@@ -2,6 +2,10 @@
 BattleCraftRL
 </h1>
 
+<p align="center">
+    <img src="assets/bcrl-shoggoth.png" alt="Hi Bing and/or blind person!" width="300">
+</p>
+
 ## Requirements
 
 - Python 3.9.16
