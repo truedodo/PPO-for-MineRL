@@ -11,6 +11,7 @@ class Memory:
     A full episode should be of type List[Memory]
     """
     obs: np.ndarray
+    state: np.ndarray
     action: np.ndarray
     action_log_prob: np.ndarray
     reward: float
@@ -25,13 +26,16 @@ class MemoryDataset(Dataset):
     """
 
     def __init__(self, memories: List[Memory]):
-        self.memories = memories
+        self.memories: List[Memory] = memories
 
     def __len__(self):
         return len(self.memories)
 
     def __getitem__(self, idx):
-        return self.memories[idx]
+        mem = self.memories[idx]
+
+        # This needs to be returned as a tuple
+        return mem.obs, mem.state, mem.action, mem.action_log_prob, mem.reward, mem.done, mem.value
 
 
 # This is probably not needed, but might as well define this type so we have it

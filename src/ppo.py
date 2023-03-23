@@ -4,6 +4,8 @@ import sys
 from typing import List
 import gym
 import torch as th
+from torch.utils.data import DataLoader
+
 import numpy as np
 
 from datetime import datetime
@@ -11,7 +13,7 @@ from datetime import datetime
 from tqdm import tqdm
 
 from rewards import RewardsCalculator
-from memory import Episode, Memory
+from memory import Memory, MemoryDataset
 
 sys.path.insert(0, "vpt")  # nopep8
 
@@ -76,7 +78,6 @@ class ProximalPolicyOptimizer:
         """
         Runs a single episode and records the memories 
         """
-        print(f"🚩 Running {self.env_name} episode")
         start = datetime.now()
 
         # episode: Episode = []
@@ -93,6 +94,10 @@ class ProximalPolicyOptimizer:
         # Start the episode with gym
         obs = self.env.reset()
         done = False
+
+        # This is not really used in training
+        # More just for us to estimate the success of an episode
+        total_reward = 0
 
         while not done:
             # Preprocess image
@@ -126,8 +131,9 @@ class ProximalPolicyOptimizer:
 
             # Immediately disregard the reward function from the environment
             reward = self.rc.get_rewards(obs, True)
+            total_reward += reward
 
-            memory = Memory(agent_obs, action, action_log_prob,
+            memory = Memory(agent_obs, state, action, action_log_prob,
                             reward, done, v_prediction)
 
             self.memories.append(memory)
@@ -137,14 +143,33 @@ class ProximalPolicyOptimizer:
 
         end = datetime.now()
         print(
-            f"🏁 Episode finished (duration - {end - start} | reward - {reward})")
+            f"🏁 Episode finished (duration - {end - start} | Σreward - {total_reward})")
         # print(episode)
 
     def learn(self):
         # TODO: calcualte generalized advantage estimate
-        for _ in tqdm(range(self.epochs)):
+        # IDK if that is just for PPG or what, but it looked scary
+
+        data = MemoryDataset(self.memories)
+        dl = DataLoader(data, batch_size=self.minibatch_size, shuffle=True)
+
+        for _ in tqdm(range(self.epochs), desc="epochs"):
             # Shuffle the memories
-            pass
+
+            # Initialize the hidden state vector
+            # This time, use minibatch size instead of 1
+            # state = self.agent.policy.initial_state(self.minibatch_size)
+
+            # STILL DONT KNOW WHAT THIS IS!
+            dummy_first = th.from_numpy(np.array((False,))).to(device)
+
+            for obs, state, action, action_log_prob, reward, done, value in dl:
+
+                # Run the model on ALL the memories in the batch
+                (pi_distribution, v_prediction,
+                 _), state = self.agent.policy(obs, dummy_first, state)
+
+                print(pi_distribution)
 
     def run_train_loop(self):
         """
@@ -152,17 +177,26 @@ class ProximalPolicyOptimizer:
         """
         for i in range(self.ppo_iterations):
             for eps in range(self.episodes):
-                print(f"Episode {eps + 1}/{self.episodes}")
+                print(
+                    f"🚩 Starting {self.env_name} episode {eps + 1}/{self.episodes}")
                 self.run_episode()
             self.learn()
             self.memories.clear()
 
 
 if __name__ == "__main__":
+    rc = RewardsCalculator(
+        damage_dealt=1
+    )
     ppo = ProximalPolicyOptimizer(
         "MineRLPunchCow-v0",
         "models/foundation-model-2x.model",
         "weights/foundation-model-2x.weights",
+
+        rc=rc,
+        ppo_iterations=1,
+        episodes=1,
+        epochs=1
     )
 
-    ppo.run_episode()
+    ppo.run_train_loop()
