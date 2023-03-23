@@ -70,7 +70,7 @@ class ProximalPolicyOptimizer:
         # Internal buffer of the most recent episode memories
         # This will be a relatively large chunk of data
         # Potential memory issues / optimizations around here...
-        self.history: List[Episode] = []
+        self.memories: List[Memory] = []
 
     def run_episode(self):
         """
@@ -79,7 +79,7 @@ class ProximalPolicyOptimizer:
         print(f"🚩 Running {self.env_name} episode")
         start = datetime.now()
 
-        episode: Episode = []
+        # episode: Episode = []
 
         # Initialize the hidden state vector
         # Note that batch size is 1 here because we are only running the agent
@@ -130,13 +130,10 @@ class ProximalPolicyOptimizer:
             memory = Memory(agent_obs, action, action_log_prob,
                             reward, done, v_prediction)
 
-            episode.append(memory)
+            self.memories.append(memory)
             # Finally, render the environment to the screen
             # Comment this out if you are boring
             self.env.render()
-
-        # Add our recorded episode to the internal history buffer
-        self.history.append(episode)
 
         end = datetime.now()
         print(
@@ -144,18 +141,21 @@ class ProximalPolicyOptimizer:
         # print(episode)
 
     def learn(self):
-        # THIS IS WHERE THE ADAM / SGD HAPPENS
-        pass
+        # TODO: calcualte generalized advantage estimate
+        for _ in tqdm(range(self.epochs)):
+            # Shuffle the memories
+            pass
 
     def run_train_loop(self):
         """
-        Runs the main training loop
+        Runs the basic PPO training loop
         """
         for i in range(self.ppo_iterations):
             for eps in range(self.episodes):
                 print(f"Episode {eps + 1}/{self.episodes}")
                 self.run_episode()
             self.learn()
+            self.memories.clear()
 
 
 if __name__ == "__main__":

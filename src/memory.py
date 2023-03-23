@@ -1,6 +1,7 @@
 from typing import List
 import numpy as np
 from dataclasses import dataclass
+from torch.utils.data import Dataset
 
 
 @dataclass
@@ -17,4 +18,22 @@ class Memory:
     value: float
 
 
+class MemoryDataset(Dataset):
+    """
+    This is a dataset of memory objects (potentially multiple episodes!)
+    This is to be used with the PyTorch DataLoader
+    """
+
+    def __init__(self, memories: List[Memory]):
+        self.memories = memories
+
+    def __len__(self):
+        return len(self.memories)
+
+    def __getitem__(self, idx):
+        return self.memories[idx]
+
+
+# This is probably not needed, but might as well define this type so we have it
+# Edit: this is almost certainly not useful since we shuffle memories anyway
 Episode = List[Memory]
