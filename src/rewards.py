@@ -44,7 +44,8 @@ class RewardsCalculator:
         reward = sum(rewards)
 
         if verbose and reward != 0:
-            print(f"Total reward: {reward}")
+            print("--------------------")
+            print(f"Total reward: {reward}\n")
 
         return reward
 
