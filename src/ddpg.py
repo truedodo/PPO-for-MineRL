@@ -13,7 +13,7 @@ import os
 # implement the noise class
 # use this to create the exploratory behaviour policy beta based on the
 # deterministic action network
-class QUActionNoise:
+class OUActionNoise:
     def __init__(self, mu, sigma=0.15, theta=0.2, dt=1e-2, x0=None) -> None:
         self.theta = theta
         self.mu = mu
@@ -214,5 +214,153 @@ class ExampleActorNetwork(nn.Module):
     def load_checkpoint(self):
         print('...loading checkpoint...')
         self.load_state_dict(T.load(self.checkpoint_file))
+
+
+class Agent():
+    # tau is a hyperparameter for updating the target network
+    # gamma is the discount factor
+    def __init__(self, actor_lr, critic_lr, input_dims, tau, env, gamma=0.99, 
+                 n_actions=2, max_size=1e6,
+                 layer1_size=400, layer2_size=300, batch_size=64) -> None:
+        
+        self.gamma = gamma
+        self.tau = tau
+        self.memory = ReplayBuffer(max_size, input_dims, n_actions)
+        self.batch_size = batch_size
+
+        self.actor = ExampleActorNetwork(actor_lr, input_dims, layer1_size, layer2_size,
+                                          n_actions=n_actions, name="actor")
+        
+        self.target_actor = ExampleActorNetwork(actor_lr, input_dims, layer1_size, layer2_size,
+                                          n_actions=n_actions, name="target_actor")
+        
+        self.critic = ExampleCriticNetwork(critic_lr, input_dims, layer1_size, layer2_size,
+                                           n_actions=n_actions, name="critic")
+        
+        self.target_critic = ExampleCriticNetwork(critic_lr, input_dims, layer1_size, layer2_size,
+                                           n_actions=n_actions, name="target_critic")
+        
+        self.noise = OUActionNoise(mu=np.zeros(n_actions))
+
+        self.update_network_parameters(tau=1)
+
+    def choose_action(self, obs):
+        # set eval mode for batch norm
+        self.actor.eval()
+        obs = T.tensor(obs, dtype=T.float).to(self.actor.device)
+        mu = self.actor(obs).to(self.actor.device)
+        # action with noise
+        mu_prime = mu + T.tensor(self.noise(), dtype=T.float).to(self.actor.device)
+        self.actor.train()
+        return mu_prime.cpu().detach.numpy()
+    
+    def remember(self, state, actoin, reward, next_state, done):
+        self.memory.store_transition(state, actoin, reward, next_state, done)
+
+    def learn(self):
+        # start learning only when you have enough samples
+        # inside of the replay buffer! (non-obvious imp. detail)
+        if self.memory.mem_cntr < self.batch_size:
+            return
+        
+        # load in all of the data from the replay buffer
+        state, action, reward, next_state, done = \
+            self.memory.sample_buffer(self.batch_size)
+        
+        reward = T.tensor(reward, dtype=float).to(self.critic.device)
+        done = T.tensor(done).to(self.critic.device)
+        action = T.tensor(action, dtype=float).to(self.critic.device)
+        next_state = T.tensor(next_state, dtype=float).to(self.critic.device)
+        state = T.tensor(state, dtype=float).to(self.critic.device)
+
+        # set networks to eval mode
+        self.target_actor.eval()
+        self.target_critic.eval()
+        self.critic.eval()
+
+        # calculate relevent network values
+        target_actions = self.target_actor.forward(next_state)
+        next_critic_value = self.target_critic.forward(next_state, target_actions)
+        critic_value = self.critic.forward(state, action)
+
+        # calculate bellman equation using network values
+        # TODO vectorize this better
+        target = []
+        for j in range(self.batch_size):
+            target.append(reward[j] + self.gamma*next_critic_value[j]*done[j])
+        target = T.tensor(target).to(self.critic.value)
+        target = target.view(self.batch_size, 1)
+
+        # now train the critic
+        # still not entirely sure how training in Pytorch works
+        # or what each method call exactly does
+        self.critic.train()
+        self.critic.optimizer.zero_grad()
+        critic_loss = F.mse(target, critic_value)
+        critic_loss.backward()
+        self.critic.optimizer.step()
+
+        # train the actor
+        self.critic.eval()
+        self.actor.optimizer.zero_grad()
+        mu = self.actor.forward(state)
+        self.actor.train()
+
+        # the gradient of the actor is just the forward pass of the critic?
+        # some result from the paper... (I think that is what this says?)
+        actor_loss = -self.critic.forward(state, mu)
+        actor_loss = T.mean(actor_loss)
+        actor_loss.backward()
+        self.actor.optimizer.step()
+
+        # update the target network gradually
+        self.update_network_parameters()
+
+    # this is for updating the target networks to lag behind the ones we are training
+    # tau is small, near 0
+    def update_network_parameters(self, tau=None):
+        if tau is None:
+            tau = self.tau
+
+        # get all of the parameters from the networks
+        actor_params = self.actor.named_parameters()
+        critic_params = self.critic.named_parameters()
+        target_actor_params = self.target_actor.named_parameters()
+        target_critic_params = self.target_critic.named_parameters()
+
+        # make these a dict for iteration
+        critic_state_dict = dict(critic_params)
+        actor_state_dict = dict(actor_params)
+        target_actor_state_dict = dict(target_actor_params)
+        target_critic_state_dict = dict(target_critic_params)
+
+        # these for loops are "averaging" the currect critic/actor values
+        # into their respective target networks
+        # TODO vectorize this better? at all?
+        for name in critic_state_dict:
+            critic_state_dict[name] = tau*critic_state_dict[name].clone()+\
+                        (1-tau)*target_critic_state_dict[name].clone()
+            
+        self.target_critic.load_state_dict(critic_state_dict)
+
+        for name in actor_state_dict:
+            actor_state_dict[name] = tau*actor_state_dict[name].clone()+\
+                        (1-tau)*target_actor_state_dict[name].clone()
+            
+        self.target_actor.load_state_dict(actor_state_dict)
+
+    def save_models(self):
+        self.actor.save_checkpoint()
+        self.critic.save_checkpoint()
+        self.target_actor.save_checkpoint()
+        self.target_critic.save_checkpoint()
+
+    def load_models(self):
+        self.actor.load_checkpoint()
+        self.critic.load_checkpoint()
+        self.target_actor.load_checkpoint()
+        self.target_critic.load_checkpoint()       
+
+
 
 
