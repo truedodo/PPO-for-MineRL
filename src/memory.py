@@ -12,6 +12,8 @@ class Memory:
     """
     obs: np.ndarray
     state: np.ndarray
+    pi_h: np.ndarray
+    v_h: np.ndarray
     action: np.ndarray
     action_log_prob: np.ndarray
     reward: float
@@ -35,7 +37,7 @@ class MemoryDataset(Dataset):
         mem = self.memories[idx]
 
         # This needs to be returned as a tuple
-        return mem.obs, mem.state, mem.action, mem.action_log_prob, mem.reward, mem.done, mem.value
+        return mem.obs, mem.state, mem.pi_h, mem.v_h, mem.action, mem.action_log_prob, mem.reward, mem.done, mem.value
 
 
 # This is probably not needed, but might as well define this type so we have it
