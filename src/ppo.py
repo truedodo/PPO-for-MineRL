@@ -144,7 +144,7 @@ class ProximalPolicyOptimizer:
             reward = self.rc.get_rewards(obs, True)
             total_reward += reward
 
-            memory = Memory(agent_obs, state, action, action_log_prob,
+            memory = Memory(agent_obs, state, pi_h, v_h, action, action_log_prob,
                             reward, done, v_prediction)
 
             self.memories.append(memory)
@@ -174,20 +174,13 @@ class ProximalPolicyOptimizer:
             # STILL DONT KNOW WHAT THIS IS!
             dummy_first = th.from_numpy(np.array((False,))).to(device)
 
-            for obs, state, action, action_log_prob, reward, done, value in dl:
-
-                print(state)
-                print(len(state))
-                state = to_torch_tensor(state)
+            for obs, state, pi_h, v_h, action, action_log_prob, reward, done, value in dl:
                 # Run the model on ALL the memories in the batch
-                pi_distribution = self.agent.policy.pi_head(state)
-                v_prediction = self.agent.policy.v_head(state)
+                pi_distribution = self.agent.policy.pi_head(pi_h)
+                v_prediction = self.agent.policy.value_head(v_h)
 
                 print(pi_distribution)
-                # (pi_distribution, v_prediction,
-                #  _), state = self.agent.policy(obs, dummy_first, state)
-
-                # print(pi_distribution)
+                print(v_prediction)
 
     def run_train_loop(self):
         """
