@@ -165,22 +165,15 @@ class ProximalPolicyOptimizer:
         dl = DataLoader(data, batch_size=self.minibatch_size, shuffle=True)
 
         for _ in tqdm(range(self.epochs), desc="epochs"):
+
             # Shuffle the memories
-
-            # Initialize the hidden state vector
-            # This time, use minibatch size instead of 1
-            # state = self.agent.policy.initial_state(self.minibatch_size)
-
-            # STILL DONT KNOW WHAT THIS IS!
-            dummy_first = th.from_numpy(np.array((False,))).to(device)
-
             for obs, state, pi_h, v_h, action, action_log_prob, reward, done, value in dl:
                 # Run the model on ALL the memories in the batch
                 pi_distribution = self.agent.policy.pi_head(pi_h)
                 v_prediction = self.agent.policy.value_head(v_h)
 
-                print(pi_distribution)
-                print(v_prediction)
+                print(pi_distribution["camera"].shape)
+                print(v_prediction.shape)
 
     def run_train_loop(self):
         """
