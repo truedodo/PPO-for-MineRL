@@ -192,7 +192,7 @@ class ExampleActorNetwork(nn.Module):
 
         self.to(self.device)
 
-    def forward(self, state, action):
+    def forward(self, state):
 
         x = self.fc1(state)
         x = self.bn1(x)
@@ -220,7 +220,7 @@ class Agent():
     # tau is a hyperparameter for updating the target network
     # gamma is the discount factor
     def __init__(self, actor_lr, critic_lr, input_dims, tau, env, gamma=0.99, 
-                 n_actions=2, max_size=1e6,
+                 n_actions=2, max_size=1000000,
                  layer1_size=400, layer2_size=300, batch_size=64) -> None:
         
         self.gamma = gamma
@@ -252,7 +252,7 @@ class Agent():
         # action with noise
         mu_prime = mu + T.tensor(self.noise(), dtype=T.float).to(self.actor.device)
         self.actor.train()
-        return mu_prime.cpu().detach.numpy()
+        return mu_prime.cpu().detach().numpy()
     
     def remember(self, state, actoin, reward, next_state, done):
         self.memory.store_transition(state, actoin, reward, next_state, done)
@@ -267,11 +267,11 @@ class Agent():
         state, action, reward, next_state, done = \
             self.memory.sample_buffer(self.batch_size)
         
-        reward = T.tensor(reward, dtype=float).to(self.critic.device)
+        reward = T.tensor(reward, dtype=T.float).to(self.critic.device)
         done = T.tensor(done).to(self.critic.device)
-        action = T.tensor(action, dtype=float).to(self.critic.device)
-        next_state = T.tensor(next_state, dtype=float).to(self.critic.device)
-        state = T.tensor(state, dtype=float).to(self.critic.device)
+        action = T.tensor(action, dtype=T.float).to(self.critic.device)
+        next_state = T.tensor(next_state, dtype=T.float).to(self.critic.device)
+        state = T.tensor(state, dtype=T.float).to(self.critic.device)
 
         # set networks to eval mode
         self.target_actor.eval()
@@ -288,7 +288,7 @@ class Agent():
         target = []
         for j in range(self.batch_size):
             target.append(reward[j] + self.gamma*next_critic_value[j]*done[j])
-        target = T.tensor(target).to(self.critic.value)
+        target = T.tensor(target).to(self.critic.device)
         target = target.view(self.batch_size, 1)
 
         # now train the critic
@@ -296,7 +296,7 @@ class Agent():
         # or what each method call exactly does
         self.critic.train()
         self.critic.optimizer.zero_grad()
-        critic_loss = F.mse(target, critic_value)
+        critic_loss = F.mse_loss(target, critic_value)
         critic_loss.backward()
         self.critic.optimizer.step()
 
