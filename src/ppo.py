@@ -14,10 +14,13 @@ from tqdm import tqdm
 
 from rewards import RewardsCalculator
 from memory import Memory, MemoryDataset
+from util import to_torch_tensor
 
 sys.path.insert(0, "vpt")  # nopep8
 
 from agent import MineRLAgent  # nopep8
+from lib.tree_util import tree_map  # nopep8
+
 
 device = th.device("cuda:0" if th.cuda.is_available() else "cpu")
 
@@ -105,11 +108,19 @@ class ProximalPolicyOptimizer:
 
             # Run the full model to get both heads and the
             # new hidden state
-            pi_distribution, v_prediction, state = self.agent.policy.get_output_for_observation(
-                agent_obs,
-                state,
-                dummy_first
-            )
+            # pi_distribution, v_prediction, state = self.agent.policy.get_output_for_observation(
+            #     agent_obs,
+            #     state,
+            #     dummy_first
+            # )
+            agent_obs = tree_map(lambda x: x.unsqueeze(1), agent_obs)
+            first = dummy_first.unsqueeze(1)
+
+            (pi_h, v_h), state = self.agent.policy.net(
+                agent_obs, state, context={"first": first})
+
+            pi_distribution = self.agent.policy.pi_head(pi_h)
+            v_prediction = self.agent.policy.value_head(v_h)
 
             # print(pi_distribution)
             # print(policy.get_logprob_of_action(pi_distribution, None))
@@ -165,11 +176,18 @@ class ProximalPolicyOptimizer:
 
             for obs, state, action, action_log_prob, reward, done, value in dl:
 
+                print(state)
+                print(len(state))
+                state = to_torch_tensor(state)
                 # Run the model on ALL the memories in the batch
-                (pi_distribution, v_prediction,
-                 _), state = self.agent.policy(obs, dummy_first, state)
+                pi_distribution = self.agent.policy.pi_head(state)
+                v_prediction = self.agent.policy.v_head(state)
 
                 print(pi_distribution)
+                # (pi_distribution, v_prediction,
+                #  _), state = self.agent.policy(obs, dummy_first, state)
+
+                # print(pi_distribution)
 
     def run_train_loop(self):
         """
@@ -196,7 +214,8 @@ if __name__ == "__main__":
         rc=rc,
         ppo_iterations=1,
         episodes=1,
-        epochs=1
+        epochs=1,
+        minibatch_size=48
     )
 
     ppo.run_train_loop()
