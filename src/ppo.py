@@ -12,18 +12,16 @@ from datetime import datetime
 from tqdm import tqdm
 from rewards import RewardsCalculator
 from memory import Memory, MemoryDataset
-from util import to_torch_tensor, normalize
+from util import to_torch_tensor, normalize, safe_reset, hard_reset
 
 sys.path.insert(0, "vpt")  # nopep8
 
 from agent import MineRLAgent  # nopep8
 from lib.tree_util import tree_map  # nopep8
 
-# This is for debugging - Jack
-th.autograd.set_detect_anomaly(True)
+# For debugging purposes
+# th.autograd.set_detect_anomaly(True)
 device = th.device("cuda:0" if th.cuda.is_available() else "cpu")
-
-figure, ax = plt.subplots(figsize=(10, 8))
 
 
 class ProximalPolicyOptimizer:
@@ -46,6 +44,9 @@ class ProximalPolicyOptimizer:
             beta_s: float = 0.01,
             eps_clip: float = 0.2,
             value_clip: float = 0.4,
+
+            # Optional: plot stuff
+            plot: bool = False,
 
     ):
         self.env_name = env_name
@@ -70,6 +71,8 @@ class ProximalPolicyOptimizer:
         self.beta_s = beta_s
         self.eps_clip = eps_clip
         self.value_clip = value_clip
+
+        self.plot = plot
 
         # Load the agent parameters from the weight files
         agent_parameters = pickle.load(open(model_path, "rb"))
@@ -110,7 +113,10 @@ class ProximalPolicyOptimizer:
         dummy_first = th.from_numpy(np.array((False,))).to(device)
 
         # Start the episode with gym
-        obs = self.env.reset()
+        # obs = self.env.reset()
+
+        obs, self.env = safe_reset(self.env)
+        # obs, self.env = hard_reset(self.env)
         done = False
 
         # This is not really used in training
@@ -169,6 +175,9 @@ class ProximalPolicyOptimizer:
             # Comment this out if you are boring
             self.env.render()
 
+        # Reset the reward calculator once we are done with the episode
+        self.rc.clear()
+
         end = datetime.now()
         print(
             f"🏁 Episode finished (duration - {end - start} | Σreward - {total_reward})")
@@ -180,6 +189,10 @@ class ProximalPolicyOptimizer:
 
         data = MemoryDataset(self.memories)
         dl = DataLoader(data, batch_size=self.minibatch_size, shuffle=True)
+
+        if self.plot:
+            pi_loss_history = []
+            v_loss_history = []
 
         for _ in tqdm(range(self.epochs), desc="epochs"):
 
@@ -219,6 +232,10 @@ class ProximalPolicyOptimizer:
                 # value_loss = clipped_value_loss(
                 #     v_prediction, rewards, old_values, self.value_clip)
 
+                if self.plot:
+                    pi_loss_history.append(policy_loss.mean().item())
+                    v_loss_history.append(value_loss.item())
+
                 # Update the policy network
                 self.optim_pi.zero_grad()
                 policy_loss.mean().backward()
@@ -229,12 +246,39 @@ class ProximalPolicyOptimizer:
                 value_loss.backward()
                 self.optim_v.step()
 
-                # update_network(value_loss, self.optim_v)
+            # Update plot at the end of every epoch
+            if self.plot:
+                self.pi_loss_plot.set_ydata(pi_loss_history)
+                self.pi_loss_plot.set_xdata(list(range(len(pi_loss_history))))
+
+                self.v_loss_plot.set_ydata(v_loss_history)
+                self.v_loss_plot.set_xdata(list(range(len(v_loss_history))))
+
+                self.ax.relim()        # Recalculate limits
+                self.ax.autoscale_view(True, True, True)
+                self.fig.canvas.draw()
+                # plt.pause(0.01)
+                self.fig.canvas.flush_events()
+            # update_network(value_loss, self.optim_v)
 
     def run_train_loop(self):
         """
         Runs the basic PPO training loop
         """
+        if self.plot:
+            # Create a plot to show the progress of the training
+            plt.ion()
+            self.fig, self.ax = plt.subplots(figsize=(6, 4))
+
+            self.ax.set_autoscale_on(True)  # enable autoscale
+            self.ax.autoscale_view(True, True, True)
+
+            self.pi_loss_plot, = self.ax.plot(
+                [], [], label="Policy Loss", color="blue")
+
+            self.v_loss_plot, = self.ax.plot(
+                [], [], label="Value Loss", color="orange")
+
         for i in range(self.ppo_iterations):
             for eps in range(self.episodes):
                 print(
@@ -250,14 +294,18 @@ if __name__ == "__main__":
     )
     ppo = ProximalPolicyOptimizer(
         "MineRLPunchCow-v0",
-        "models/foundation-model-1x.model",
-        "weights/foundation-model-1x.weights",
+        "models/foundation-model-2x.model",
+        "weights/foundation-model-2x.weights",
 
         rc=rc,
-        ppo_iterations=10,
+        ppo_iterations=100,
         episodes=3,
-        epochs=10,
-        minibatch_size=48
+        epochs=12,
+        minibatch_size=48,
+        lr=1e-3,
+
+
+        plot=True
     )
 
     ppo.run_train_loop()
