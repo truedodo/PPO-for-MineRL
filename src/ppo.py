@@ -74,6 +74,17 @@ class ProximalPolicyOptimizer:
 
         self.plot = plot
 
+        if self.plot:
+            self.pi_loss_history = []
+            self.v_loss_history = []
+
+            self.entropy_history = []
+
+            self.surr1_history = []
+            self.surr2_history = []
+
+            self.reward_history = []
+
         # Load the agent parameters from the weight files
         agent_parameters = pickle.load(open(model_path, "rb"))
         policy_kwargs = agent_parameters["model"]["args"]["net"]["args"]
@@ -114,7 +125,6 @@ class ProximalPolicyOptimizer:
 
         # Start the episode with gym
         # obs = self.env.reset()
-
         obs, self.env = safe_reset(self.env)
         # obs, self.env = hard_reset(self.env)
         done = False
@@ -178,6 +188,18 @@ class ProximalPolicyOptimizer:
         # Reset the reward calculator once we are done with the episode
         self.rc.clear()
 
+        if self.plot:
+            # Updat the reward plot
+            self.reward_history.append(total_reward)
+            self.reward_plot.set_ydata(self.reward_history)
+            self.reward_plot.set_xdata(range(len(self.reward_history)))
+
+            self.ax[1, 1].relim()
+            self.ax[1, 1].autoscale_view(True, True, True)
+
+            self.fig.canvas.draw()
+            self.fig.canvas.flush_events()
+
         end = datetime.now()
         print(
             f"🏁 Episode finished (duration - {end - start} | Σreward - {total_reward})")
@@ -190,9 +212,9 @@ class ProximalPolicyOptimizer:
         data = MemoryDataset(self.memories)
         dl = DataLoader(data, batch_size=self.minibatch_size, shuffle=True)
 
-        if self.plot:
-            pi_loss_history = []
-            v_loss_history = []
+        # if self.plot:
+        #     pi_loss_history = []
+        #     v_loss_history = []
 
         for _ in tqdm(range(self.epochs), desc="epochs"):
 
@@ -202,6 +224,8 @@ class ProximalPolicyOptimizer:
                 # Run the model on the batch using the latent state output
                 pi_distribution = self.agent.policy.pi_head(pi_h)
                 v_prediction = self.agent.policy.value_head(v_h)
+
+                # PUT GAE RIGHT HERE
 
                 # Get log probs
                 action_log_probs = self.agent.policy.get_logprob_of_action(
@@ -233,8 +257,10 @@ class ProximalPolicyOptimizer:
                 #     v_prediction, rewards, old_values, self.value_clip)
 
                 if self.plot:
-                    pi_loss_history.append(policy_loss.mean().item())
-                    v_loss_history.append(value_loss.item())
+                    self.pi_loss_history.append(policy_loss.mean().item())
+                    self.v_loss_history.append(value_loss.item())
+
+                    self.entropy_history.append(entropy.mean().item())
 
                 # Update the policy network
                 self.optim_pi.zero_grad()
@@ -248,16 +274,26 @@ class ProximalPolicyOptimizer:
 
             # Update plot at the end of every epoch
             if self.plot:
-                self.pi_loss_plot.set_ydata(pi_loss_history)
-                self.pi_loss_plot.set_xdata(list(range(len(pi_loss_history))))
+                # Update the loss plot
+                self.pi_loss_plot.set_ydata(self.pi_loss_history)
+                self.pi_loss_plot.set_xdata(
+                    list(range(len(self.pi_loss_history))))
 
-                self.v_loss_plot.set_ydata(v_loss_history)
-                self.v_loss_plot.set_xdata(list(range(len(v_loss_history))))
+                self.v_loss_plot.set_ydata(self.v_loss_history)
+                self.v_loss_plot.set_xdata(
+                    list(range(len(self.v_loss_history))))
 
-                self.ax.relim()        # Recalculate limits
-                self.ax.autoscale_view(True, True, True)
+                self.ax[0, 0].relim()
+                self.ax[0, 0].autoscale_view(True, True, True)
+
+                # Update the entropy plot
+                self.entropy_plot.set_ydata(self.entropy_history)
+                self.entropy_plot.set_xdata(range(len(self.entropy_history)))
+
+                self.ax[0, 1].relim()
+                self.ax[0, 1].autoscale_view(True, True, True)
+
                 self.fig.canvas.draw()
-                # plt.pause(0.01)
                 self.fig.canvas.flush_events()
             # update_network(value_loss, self.optim_v)
 
@@ -268,16 +304,35 @@ class ProximalPolicyOptimizer:
         if self.plot:
             # Create a plot to show the progress of the training
             plt.ion()
-            self.fig, self.ax = plt.subplots(figsize=(6, 4))
+            self.fig, self.ax = plt.subplots(2, 2, figsize=(10, 8))
 
-            self.ax.set_autoscale_on(True)  # enable autoscale
-            self.ax.autoscale_view(True, True, True)
+            # Set up loss plot
+            self.ax[0, 0].set_autoscale_on(True)
+            self.ax[0, 0].autoscale_view(True, True, True)
 
-            self.pi_loss_plot, = self.ax.plot(
+            self.ax[0, 0].set_title("Loss")
+
+            self.pi_loss_plot, = self.ax[0, 0].plot(
                 [], [], label="Policy Loss", color="blue")
 
-            self.v_loss_plot, = self.ax.plot(
+            self.v_loss_plot, = self.ax[0, 0].plot(
                 [], [], label="Value Loss", color="orange")
+
+            self.ax[0, 0].legend(loc="upper right")
+
+            # Setup entropy plot
+            self.ax[0, 1].set_autoscale_on(True)
+            self.ax[0, 1].autoscale_view(True, True, True)
+            self.ax[0, 1].set_title("Entropy")
+
+            self.entropy_plot, = self.ax[0, 1].plot([], [], color="green")
+
+            # Setup reward plot
+            self.ax[1, 1].set_autoscale_on(True)
+            self.ax[1, 1].autoscale_view(True, True, True)
+            self.ax[1, 1].set_title("Reward per Episode")
+
+            self.reward_plot,  = self.ax[1, 1].plot([], [], color="red")
 
         for i in range(self.ppo_iterations):
             for eps in range(self.episodes):
@@ -299,10 +354,11 @@ if __name__ == "__main__":
 
         rc=rc,
         ppo_iterations=100,
-        episodes=3,
+        episodes=5,
         epochs=12,
         minibatch_size=48,
         lr=1e-3,
+        eps_clip=0.1,
 
 
         plot=True
