@@ -221,7 +221,7 @@ class Agent():
     # gamma is the discount factor
     def __init__(self, actor_lr, critic_lr, input_dims, tau, env, gamma=0.99, 
                  n_actions=2, max_size=1000000,
-                 layer1_size=400, layer2_size=300, batch_size=64) -> None:
+                 layer1_size=400, layer2_size=300, batch_size=64, load=False) -> None:
         
         self.gamma = gamma
         self.tau = tau
@@ -243,6 +243,9 @@ class Agent():
         self.noise = OUActionNoise(mu=np.zeros(n_actions))
 
         self.update_network_parameters(tau=1)
+
+        if load:
+            self.load_models()
 
     def choose_action(self, obs):
         # set eval mode for batch norm
