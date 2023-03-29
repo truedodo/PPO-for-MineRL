@@ -11,3 +11,5 @@ logs/
 .DS_Store
 
 __pycache__
+
+src/tmp
