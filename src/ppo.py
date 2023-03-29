@@ -21,7 +21,8 @@ from lib.tree_util import tree_map  # nopep8
 
 # For debugging purposes
 # th.autograd.set_detect_anomaly(True)
-device = th.device("cuda:0" if th.cuda.is_available() else "cpu")
+# device = th.device("cuda:0" if th.cuda.is_available() else "cpu")
+device = th.device("cpu")
 
 
 class ProximalPolicyOptimizer:
@@ -44,9 +45,14 @@ class ProximalPolicyOptimizer:
             beta_s: float = 0.01,
             eps_clip: float = 0.2,
             value_clip: float = 0.4,
+            gamma: float = 0.99,
+            lam: float = 0.95,
+            # tau: float = 0.95,
 
             # Optional: plot stuff
             plot: bool = False,
+
+            mem_buffer_size: int = 5000,
 
     ):
         self.env_name = env_name
@@ -71,8 +77,13 @@ class ProximalPolicyOptimizer:
         self.beta_s = beta_s
         self.eps_clip = eps_clip
         self.value_clip = value_clip
+        self.gamma = gamma
+        self.lam = lam
+        # self.tau = tau
 
         self.plot = plot
+
+        self.mem_buffer_size = mem_buffer_size
 
         if self.plot:
             self.pi_loss_history = []
@@ -112,7 +123,8 @@ class ProximalPolicyOptimizer:
         """
         start = datetime.now()
 
-        # episode: Episode = []
+        # Temporary buffer to put the memories in before extending self.memories
+        episode_memories: List[Memory] = []
 
         # Initialize the hidden state vector
         # Note that batch size is 1 here because we are only running the agent
@@ -155,13 +167,20 @@ class ProximalPolicyOptimizer:
                 pi_distribution = self.agent.policy.pi_head(pi_h)
                 v_prediction = self.agent.policy.value_head(v_h)
 
+                # print(pi_distribution)
+                # print(pi_distribution["camera"].shape)
+                # print(pi_distribution["buttons"].shape)
+                # print(v_prediction)
+
             # print(pi_distribution)
             # print(policy.get_logprob_of_action(pi_distribution, None))
 
             # Get action sampled from policy distribution
-            # If deterministic==True, this is just argmax BTW
+            # If deterministic==True, this just uses argmax
             action = self.agent.policy.pi_head.sample(
                 pi_distribution, deterministic=False)
+
+            # print(action)
 
             # Get log probability of taking this action given pi
             action_log_prob = self.agent.policy.get_logprob_of_action(
@@ -170,6 +189,8 @@ class ProximalPolicyOptimizer:
             # Process this so the env can accept it
             minerl_action = self.agent._agent_action_to_env(action)
 
+            # print(minerl_action)
+
             # Take action step in the environment
             obs, reward, done, info = self.env.step(minerl_action)
 
@@ -177,16 +198,24 @@ class ProximalPolicyOptimizer:
             reward = self.rc.get_rewards(obs, True)
             total_reward += reward
 
-            memory = Memory(agent_obs, state, pi_h, v_h, action, action_log_prob,
-                            reward, done, v_prediction)
+            memory = Memory(pi_h, v_h, action, action_log_prob,
+                            reward, 0, done, v_prediction)
 
-            self.memories.append(memory)
+            episode_memories.append(memory)
             # Finally, render the environment to the screen
             # Comment this out if you are boring
             self.env.render()
 
+        # Update all memories so we know the total reward of its episode
+        # Intuition: memories from episodes where 0 reward was achieved are less valuable
+        for mem in episode_memories:
+            mem.total_reward = total_reward
+
         # Reset the reward calculator once we are done with the episode
         self.rc.clear()
+
+        # Update internal memory buffer
+        self.memories.extend(episode_memories)
 
         if self.plot:
             # Updat the reward plot
@@ -202,8 +231,7 @@ class ProximalPolicyOptimizer:
 
         end = datetime.now()
         print(
-            f"🏁 Episode finished (duration - {end - start} | Σreward - {total_reward})")
-        # print(episode)
+            f"✅ Episode finished (duration - {end - start} | memories - {len(episode_memories)} | total reward - {total_reward})")
 
     def learn(self):
         # TODO: calcualte generalized advantage estimate
@@ -220,13 +248,29 @@ class ProximalPolicyOptimizer:
 
             # Shuffle the memories
             # Note: These are batches! Not individual samples
-            for obs, states, pi_h, v_h, actions, old_action_log_probs, rewards, dones, v_old in dl:
+            for pi_h, v_h, actions, old_action_log_probs, rewards, total_rewards, dones, v_old in dl:
                 # Run the model on the batch using the latent state output
                 pi_distribution = self.agent.policy.pi_head(pi_h)
                 v_prediction = self.agent.policy.value_head(v_h)
 
-                # PUT GAE RIGHT HERE
+                masks = list(map(lambda d: 1-float(d), dones))
 
+                returns = []
+                gae = 0
+
+                for i in reversed(range(len(rewards))):
+                    # hacky but necessary since we don't have "next_state"
+                    v_next = v_old[i + 1] if i != len(rewards) - 1 else 0
+                    delta = rewards[i] + self.gamma * \
+                        v_next * masks[i] - v_old[i]
+                    gae = delta + self.gamma * self.lam * masks[i] * gae
+                    returns.insert(0, gae + v_old[i])
+
+                # print(rewards)
+                # Overwrite the rewards now
+                rewards = th.tensor(returns).float().to(device)
+
+                # print(rewards)
                 # Get log probs
                 action_log_probs = self.agent.policy.get_logprob_of_action(
                     pi_distribution, actions)
@@ -256,11 +300,11 @@ class ProximalPolicyOptimizer:
                 # value_loss = clipped_value_loss(
                 #     v_prediction, rewards, old_values, self.value_clip)
 
-                if self.plot:
-                    self.pi_loss_history.append(policy_loss.mean().item())
-                    self.v_loss_history.append(value_loss.item())
+                # if self.plot:
+                #     self.pi_loss_history.append(policy_loss.mean().item())
+                #     self.v_loss_history.append(value_loss.item())
 
-                    self.entropy_history.append(entropy.mean().item())
+                #     self.entropy_history.append(entropy.mean().item())
 
                 # Update the policy network
                 self.optim_pi.zero_grad()
@@ -274,24 +318,34 @@ class ProximalPolicyOptimizer:
 
             # Update plot at the end of every epoch
             if self.plot:
-                # Update the loss plot
+                self.pi_loss_history.append(policy_loss.mean().item())
+                self.v_loss_history.append(value_loss.item())
+
+                self.entropy_history.append(entropy.mean().item())
+
+                # Update the loss plots
                 self.pi_loss_plot.set_ydata(self.pi_loss_history)
                 self.pi_loss_plot.set_xdata(
                     list(range(len(self.pi_loss_history))))
 
+                # Update policy loss plot
+                self.ax[0, 0].relim()
+                self.ax[0, 0].autoscale_view(True, True, True)
+
+                # Update value loss plot
+
                 self.v_loss_plot.set_ydata(self.v_loss_history)
                 self.v_loss_plot.set_xdata(
                     list(range(len(self.v_loss_history))))
-
-                self.ax[0, 0].relim()
-                self.ax[0, 0].autoscale_view(True, True, True)
+                self.ax[0, 1].relim()
+                self.ax[0, 1].autoscale_view(True, True, True)
 
                 # Update the entropy plot
                 self.entropy_plot.set_ydata(self.entropy_history)
                 self.entropy_plot.set_xdata(range(len(self.entropy_history)))
 
-                self.ax[0, 1].relim()
-                self.ax[0, 1].autoscale_view(True, True, True)
+                self.ax[1, 0].relim()
+                self.ax[1, 0].autoscale_view(True, True, True)
 
                 self.fig.canvas.draw()
                 self.fig.canvas.flush_events()
@@ -306,26 +360,32 @@ class ProximalPolicyOptimizer:
             plt.ion()
             self.fig, self.ax = plt.subplots(2, 2, figsize=(10, 8))
 
-            # Set up loss plot
+            # Set up policy loss plot
             self.ax[0, 0].set_autoscale_on(True)
             self.ax[0, 0].autoscale_view(True, True, True)
 
-            self.ax[0, 0].set_title("Loss")
+            self.ax[0, 0].set_title("Policy Loss")
 
             self.pi_loss_plot, = self.ax[0, 0].plot(
-                [], [], label="Policy Loss", color="blue")
+                [], [], color="blue")
 
-            self.v_loss_plot, = self.ax[0, 0].plot(
-                [], [], label="Value Loss", color="orange")
-
-            self.ax[0, 0].legend(loc="upper right")
-
-            # Setup entropy plot
+            # Setup value loss plot
             self.ax[0, 1].set_autoscale_on(True)
             self.ax[0, 1].autoscale_view(True, True, True)
-            self.ax[0, 1].set_title("Entropy")
 
-            self.entropy_plot, = self.ax[0, 1].plot([], [], color="green")
+            self.ax[0, 1].set_title("Value Loss")
+
+            self.v_loss_plot, = self.ax[0, 1].plot(
+                [], [], color="orange")
+
+            # self.ax[0, 0].legend(loc="upper right")
+
+            # Setup entropy plot
+            self.ax[1, 0].set_autoscale_on(True)
+            self.ax[1, 0].autoscale_view(True, True, True)
+            self.ax[1, 0].set_title("Entropy")
+
+            self.entropy_plot, = self.ax[1, 0].plot([], [], color="green")
 
             # Setup reward plot
             self.ax[1, 1].set_autoscale_on(True)
@@ -337,10 +397,18 @@ class ProximalPolicyOptimizer:
         for i in range(self.ppo_iterations):
             for eps in range(self.episodes):
                 print(
-                    f"🚩 Starting {self.env_name} episode {eps + 1}/{self.episodes}")
+                    f"🎬 Starting {self.env_name} episode {eps + 1}/{self.episodes}")
                 self.run_episode()
+
+            # Trim the size of memory buffer:
+            if len(self.memories) > self.mem_buffer_size:
+                self.memories.sort(key=lambda mem: mem.total_reward)
+                self.memories = self.memories[-self.mem_buffer_size:]
+                print(
+                    f"⚠️ Trimmed memory buffer to length {self.mem_buffer_size} (worst - {self.memories[0].total_reward} | best - {self.memories[-1].total_reward})")
+
             self.learn()
-            self.memories.clear()
+            # self.memories.clear()
 
 
 if __name__ == "__main__":
@@ -357,9 +425,8 @@ if __name__ == "__main__":
         episodes=5,
         epochs=12,
         minibatch_size=48,
-        lr=1e-3,
+        lr=1e-5,
         eps_clip=0.1,
-
 
         plot=True
     )
