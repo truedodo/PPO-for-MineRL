@@ -45,6 +45,7 @@ class ProximalPolicyOptimizer:
             beta_s: float = 0.01,
             eps_clip: float = 0.1,
             value_clip: float = 0.4,
+            value_loss_weight: float = 0.5,
             gamma: float = 0.99,
             lam: float = 0.95,
             # tau: float = 0.95,
@@ -77,6 +78,7 @@ class ProximalPolicyOptimizer:
         self.beta_s = beta_s
         self.eps_clip = eps_clip
         self.value_clip = value_clip
+        self.value_loss_weight = value_loss_weight
         self.gamma = gamma
         self.lam = lam
         # self.tau = tau
@@ -106,11 +108,17 @@ class ProximalPolicyOptimizer:
                                  pi_head_kwargs=pi_head_kwargs)
         self.agent.load_weights(weights_path)
 
-        self.optim_pi = th.optim.Adam(
-            self.agent.policy.pi_head.parameters(), lr=lr, betas=betas)
+        # This can be adjusted later to only train certain heads
+        # Unifying all parameters under one optimizer gives us much more flexibility
+        trainable_parameters = self.agent.policy.parameters()
 
-        self.optim_v = th.optim.Adam(
-            self.agent.policy.value_head.parameters(), lr=lr, betas=betas)
+        self.optim = th.optim.Adam(trainable_parameters, lr=lr, betas=betas)
+
+        # self.optim_pi = th.optim.Adam(
+        #     self.agent.policy.pi_head.parameters(), lr=lr, betas=betas)
+
+        # self.optim_v = th.optim.Adam(
+        #     self.agent.policy.value_head.parameters(), lr=lr, betas=betas)
 
         # Internal buffer of the most recent episode memories
         # This will be a relatively large chunk of data
@@ -129,11 +137,11 @@ class ProximalPolicyOptimizer:
         # Initialize the hidden state vector
         # Note that batch size is 1 here because we are only running the agent
         # on a single episode
-        # In learn(), we will use a variable batch size
         state = self.agent.policy.initial_state(1)
 
-        # IDK what this is!
+        # I think these are just internal masks that should just be set to false
         dummy_first = th.from_numpy(np.array((False,))).to(device)
+        dummy_first = dummy_first.unsqueeze(1)
 
         # Start the episode with gym
         # obs = self.env.reset()
@@ -153,20 +161,36 @@ class ProximalPolicyOptimizer:
             # Preprocess image
             agent_obs = self.agent._env_obs_to_agent(obs)
 
-            # Run the full model to get both heads and the
-            # new hidden state
-            # pi_distribution, v_prediction, state = self.agent.policy.get_output_for_observation(
-            #     agent_obs,
-            #     state,
-            #     dummy_first
-            # )
+            # Basically just adds a dimension to the tensor
             agent_obs = tree_map(lambda x: x.unsqueeze(1), agent_obs)
-            first = dummy_first.unsqueeze(1)
+
+            # print(agent_obs["img"].shape)
+            # print(dummy_first.shape)
+            # print(len(state))
+            # print("hi")
+            # print(len(state[0]))
+            # print(len(state[1]))
+            # print(len(state[2]))
+            # print(len(state[3]))
+
+            # print(state[1].shape)
+            # print(state[2].shape)
+            # print(state[3].shape)
 
             # Need to run this with no_grad or else the gradient descent will crash during training lol
             with th.no_grad():
                 (pi_h, v_h), state = self.agent.policy.net(
-                    agent_obs, state, context={"first": first})
+                    agent_obs, state, context={"first": dummy_first})
+
+                # print(state.shape)
+
+                # print(state[0][0].shape)
+                # print(state[0][1][0].shape)
+                # print(state[0][1][1].shape)
+                # # print(len(state[0][1]))
+
+                # print(state[1][0].shape)
+                # print(state[1][1].shape)
 
                 pi_distribution = self.agent.policy.pi_head(pi_h)
                 v_prediction = self.agent.policy.value_head(v_h)
@@ -202,7 +226,7 @@ class ProximalPolicyOptimizer:
             reward = self.rc.get_rewards(obs, True)
             total_reward += reward
 
-            memory = Memory(pi_h, v_h, action, action_log_prob,
+            memory = Memory(agent_obs, state, pi_h, v_h, action, action_log_prob,
                             reward, 0, done, v_prediction)
 
             episode_memories.append(memory)
@@ -238,24 +262,46 @@ class ProximalPolicyOptimizer:
             f"✅ Episode finished (duration - {end - start} | memories - {len(episode_memories)} | total reward - {total_reward})")
 
     def learn(self):
-        # TODO: calcualte generalized advantage estimate
-        # IDK if that is just for PPG or what, but it looked scary
 
+        # Create dataloader from the memory buffer
         data = MemoryDataset(self.memories)
         dl = DataLoader(data, batch_size=self.minibatch_size, shuffle=True)
 
-        # if self.plot:
-        #     pi_loss_history = []
-        #     v_loss_history = []
+        # dummy_first = th.from_numpy(
+        #     np.tile(np.array((False,)), self.minibatch_size)).to(device)
+
+        # dummy_first = th.from_numpy(np.array((False,))).to(device)
+        # dummy_first = dummy_first.unsqueeze(1)
+        # # print(dummy_first.shape)
+
+        # Shorthand
+        policy = self.agent.policy
 
         for _ in tqdm(range(self.epochs), desc="epochs"):
 
-            # Shuffle the memories
-            # Note: These are batches! Not individual samples
-            for pi_h, v_h, actions, old_action_log_probs, rewards, total_rewards, dones, v_old in dl:
-                # Run the model on the batch using the latent state output
+            # Note: These are batches, not individual samples
+            for agent_obs, state, recorded_pi_h, recorded_v_h, actions, old_action_log_probs, rewards, total_rewards, dones, v_old in dl:
+                batch_size = len(dones)
+                # print(agent_obs["img"].shape)
+                v_old = v_old.to(device)
+
+                # DATALOADER WHY DO YOU LOVE ADDING DIMENSIONS?!!
+                for i in range(len(state)):
+                    state[i][0] = state[i][0].squeeze(1)
+                    state[i][1][0] = state[i][1][0].squeeze(1)
+                    state[i][1][1] = state[i][1][1].squeeze(1)
+                agent_obs = tree_map(lambda x: x.squeeze(1), agent_obs)
+
+                dummy_first = th.from_numpy(np.full(
+                    (batch_size, 1), False)).to(device)
+
+                # print(dummy_first.shape)
+
+                (pi_h, v_h), state_out = policy.net(
+                    agent_obs, state, context={"first": dummy_first})
+
                 pi_distribution = self.agent.policy.pi_head(pi_h)
-                v_prediction = self.agent.policy.value_head(v_h)
+                v_prediction = self.agent.policy.value_head(v_h).to(device)
 
                 masks = list(map(lambda d: 1-float(d), dones))
 
@@ -280,11 +326,14 @@ class ProximalPolicyOptimizer:
                 action_log_probs = self.agent.policy.get_logprob_of_action(
                     pi_distribution, actions)
 
-                entropy = self.agent.policy.pi_head.entropy(pi_distribution)
+                entropy = self.agent.policy.pi_head.entropy(
+                    pi_distribution).to(device)
 
                 # Calculate clipped surrogate objective
-                ratios = (action_log_probs - old_action_log_probs).exp()
-                advantages = normalize(rewards - v_prediction.detach())
+                ratios = (action_log_probs -
+                          old_action_log_probs).exp().to(device)
+                advantages = normalize(
+                    rewards - v_prediction.detach().to(device))
                 surr1 = ratios * advantages
                 surr2 = ratios.clamp(
                     1 - self.eps_clip, 1 + self.eps_clip) * advantages
@@ -294,8 +343,8 @@ class ProximalPolicyOptimizer:
                 # print(policy_loss.shape)
 
                 # Calculate clipped value loss
-                value_clipped = v_old + \
-                    (v_prediction - v_old).clamp(-self.value_clip, self.value_clip)
+                value_clipped = (v_old +
+                                 (v_prediction - v_old).clamp(-self.value_clip, self.value_clip)).to(device)
 
                 value_loss_1 = (value_clipped.squeeze() - rewards) ** 2
                 value_loss_2 = (v_prediction.squeeze() - rewards) ** 2
@@ -305,29 +354,21 @@ class ProximalPolicyOptimizer:
                 # value_loss = clipped_value_loss(
                 #     v_prediction, rewards, old_values, self.value_clip)
 
-                # if self.plot:
-                #     self.pi_loss_history.append(policy_loss.mean().item())
-                #     self.v_loss_history.append(value_loss.item())
+                if self.plot:
+                    self.pi_loss_history.append(policy_loss.mean().item())
+                    self.v_loss_history.append(value_loss.item())
 
-                #     self.entropy_history.append(entropy.mean().item())
+                    self.entropy_history.append(entropy.mean().item())
 
-                # Update the policy network
-                self.optim_pi.zero_grad()
-                policy_loss.mean().backward()
-                self.optim_pi.step()
+                loss = policy_loss.mean() + self.value_loss_weight * value_loss
 
-                # Update the value network
-                self.optim_v.zero_grad()
-                value_loss.backward()
-                self.optim_v.step()
+                loss.backward()
+
+                self.optim.step()
+                self.optim.zero_grad()
 
             # Update plot at the end of every epoch
             if self.plot:
-                self.pi_loss_history.append(policy_loss.mean().item())
-                self.v_loss_history.append(value_loss.item())
-
-                self.entropy_history.append(entropy.mean().item())
-
                 # Update the loss plots
                 self.pi_loss_plot.set_ydata(self.pi_loss_history)
                 self.pi_loss_plot.set_xdata(
@@ -427,10 +468,10 @@ if __name__ == "__main__":
 
         rc=rc,
         ppo_iterations=100,
-        episodes=10,
-        epochs=12,
+        episodes=5,
+        epochs=8,
         minibatch_size=48,
-        lr=0.00025,
+        lr=0.000181,
         eps_clip=0.1,
 
         plot=True
