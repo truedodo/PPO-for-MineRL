@@ -22,7 +22,7 @@ from lib.tree_util import tree_map  # nopep8
 # For debugging purposes
 # th.autograd.set_detect_anomaly(True)
 # device = th.device("cuda:0" if th.cuda.is_available() else "cpu")
-device = th.device("cpu")
+device = th.device("mps")  # apple silicon
 
 
 class ProximalPolicyOptimizer:
@@ -43,7 +43,7 @@ class ProximalPolicyOptimizer:
             lr: float = 1e-4,
             betas: tuple = (0.9, 0.999),
             beta_s: float = 0.01,
-            eps_clip: float = 0.2,
+            eps_clip: float = 0.1,
             value_clip: float = 0.4,
             gamma: float = 0.99,
             lam: float = 0.95,
@@ -52,7 +52,7 @@ class ProximalPolicyOptimizer:
             # Optional: plot stuff
             plot: bool = False,
 
-            mem_buffer_size: int = 5000,
+            mem_buffer_size: int = 50000,
 
     ):
         self.env_name = env_name
@@ -117,7 +117,7 @@ class ProximalPolicyOptimizer:
         # Potential memory issues / optimizations around here...
         self.memories: List[Memory] = []
 
-    def run_episode(self):
+    def run_episode(self, hard_reset: bool = False):
         """
         Runs a single episode and records the memories 
         """
@@ -137,8 +137,12 @@ class ProximalPolicyOptimizer:
 
         # Start the episode with gym
         # obs = self.env.reset()
-        obs, self.env = safe_reset(self.env)
-        # obs, self.env = hard_reset(self.env)
+        if hard_reset:
+            self.env.close()
+            self.env = gym.make(self.env_name)
+            obs = self.env.reset()
+        else:
+            obs = self.env.reset()
         done = False
 
         # This is not really used in training
@@ -261,6 +265,7 @@ class ProximalPolicyOptimizer:
                 for i in reversed(range(len(rewards))):
                     # hacky but necessary since we don't have "next_state"
                     v_next = v_old[i + 1] if i != len(rewards) - 1 else 0
+
                     delta = rewards[i] + self.gamma * \
                         v_next * masks[i] - v_old[i]
                     gae = delta + self.gamma * self.lam * masks[i] * gae
@@ -398,7 +403,7 @@ class ProximalPolicyOptimizer:
             for eps in range(self.episodes):
                 print(
                     f"🎬 Starting {self.env_name} episode {eps + 1}/{self.episodes}")
-                self.run_episode()
+                self.run_episode(hard_reset=eps == 0)
 
             # Trim the size of memory buffer:
             if len(self.memories) > self.mem_buffer_size:
@@ -422,10 +427,10 @@ if __name__ == "__main__":
 
         rc=rc,
         ppo_iterations=100,
-        episodes=5,
+        episodes=10,
         epochs=12,
         minibatch_size=48,
-        lr=1e-5,
+        lr=0.00025,
         eps_clip=0.1,
 
         plot=True

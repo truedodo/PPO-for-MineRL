@@ -19,10 +19,10 @@ import sys
 from rewards import RewardsCalculator
 sys.path.insert(0, "vpt")  # nopep8
 
-from vpt.agent import MineRLAgent  # nopep8
+from agent import MineRLAgent  # nopep8
 
 
-n_trials = 100
+n_trials = 200
 rewards = []
 
 
@@ -46,10 +46,16 @@ rc = RewardsCalculator(
     damage_dealt=1
 )
 
+plt.ion()
+fig = plt.figure()
+
+n, bins, patches = plt.hist(
+    [], bins=[0, 5, 10, 15, 20, 25, 30, 35, 40, 45, 50, 55, 60, 65, 70, 75])
 
 for k in range(n_trials):
     start = datetime.now()
     print(f"🚩 Starting trial {k+1}/{n_trials}")
+    agent.reset()
     obs = env.reset()
     done = False
     total_reward = 0
@@ -65,8 +71,21 @@ for k in range(n_trials):
     rewards.append(total_reward)
     print(
         f"🏁 Finished  with {total_reward} reward (time: {datetime.now() - start})\n")
+    print(f"Current mean:   {np.mean(rewards)}")
+    print(f"Current stddev: {np.std(rewards)}")
+    print(f"(n={len(rewards)})")
+    print()
+
+    new_n, _ = np.histogram(rewards, bins=bins)
+    for patch, new_value in zip(patches, new_n):
+        patch.set_height(new_value)
+
+    # Update the ylim to accommodate new data
+    plt.ylim(0, np.max(new_n) * 1.1)
+
+    # Redraw the canvas
+    plt.draw()
+    fig.canvas.flush_events()
+
 
 env.close()
-
-print(f"Reward mean:   {np.mean(rewards)}")
-print(f"Reward stddev: {np.std(rewards)}")
