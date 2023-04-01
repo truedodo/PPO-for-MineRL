@@ -1,6 +1,7 @@
 from typing import List
 import numpy as np
 from dataclasses import dataclass
+import torch as th
 from torch.utils.data import Dataset
 
 
@@ -12,6 +13,9 @@ class Memory:
     """
     # obs: np.ndarray
     # state: np.ndarray
+    # obs: th.Tensor
+    agent_obs: dict
+    state: np.ndarray
     pi_h: np.ndarray
     v_h: np.ndarray
     action: np.ndarray
@@ -38,7 +42,7 @@ class MemoryDataset(Dataset):
         mem = self.memories[idx]
 
         # This needs to be returned as a tuple
-        return mem.pi_h, mem.v_h, mem.action, mem.action_log_prob, mem.reward, mem.total_reward, mem.done, mem.value
+        return mem.agent_obs, mem.state, mem.pi_h, mem.v_h, mem.action, mem.action_log_prob, mem.reward, mem.total_reward, mem.done, mem.value
 
 
 # This is probably not needed, but might as well define this type so we have it
