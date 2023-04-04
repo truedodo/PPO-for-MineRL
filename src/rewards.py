@@ -15,6 +15,7 @@ class RewardsCalculator:
         Ex: RewardsCalculator(damage_dealt=1, damage_taken=20)
         """
         self.stats = {}
+        self.time_punishment = 0
 
         for k, v in kwargs.items():
             assert k in stat_names, f"Invalid stat: {k}"
@@ -41,7 +42,7 @@ class RewardsCalculator:
                 # Update the current value
                 v[1] = curr
 
-        reward = sum(rewards)
+        reward = sum(rewards) + self.time_punishment
 
         if verbose and reward != 0:
             print("--------------------")
@@ -52,6 +53,14 @@ class RewardsCalculator:
     def clear(self):
         for k in self.stats:
             self.stats[k][1] = 0
+
+    def set_time_punishment(self, val):
+        '''
+        Sets the give value to the reward given at each timestep
+
+        For a punishment, val should be negative
+        '''
+        self.time_punishment = val
 
 
 if __name__ == "__main__":
