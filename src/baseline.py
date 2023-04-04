@@ -17,8 +17,8 @@ import matplotlib.pyplot as plt
 
 import sys
 from rewards import RewardsCalculator
-sys.path.insert(0, "vpt")  # nopep8
 
+sys.path.insert(0, "vpt")  # nopep8
 from agent import MineRLAgent  # nopep8
 
 
