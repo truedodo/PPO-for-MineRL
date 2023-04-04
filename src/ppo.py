@@ -33,27 +33,29 @@ class ProximalPolicyOptimizer:
             weights_path: str,
 
             # A custom reward function to be used
-            rc: RewardsCalculator = None,
+            rc: RewardsCalculator,
 
             # Hyperparameters
-            ppo_iterations=5,
-            episodes: int = 3,
-            epochs: int = 8,
-            minibatch_size: int = 10,
-            lr: float = 1e-4,
-            betas: tuple = (0.9, 0.999),
-            beta_s: float = 0.01,
-            eps_clip: float = 0.1,
-            value_clip: float = 0.4,
-            value_loss_weight: float = 0.5,
-            gamma: float = 0.99,
-            lam: float = 0.95,
+            ppo_iterations: int,
+            episodes: int,
+            epochs: int,
+            minibatch_size: int,
+            lr: float,
+            betas: tuple,
+            beta_s: float,
+            eps_clip: float,
+            value_clip: float,
+            value_loss_weight: float,
+            gamma: float,
+            lam: float,
+
+            mem_buffer_size: int,
             # tau: float = 0.95,
 
             # Optional: plot stuff
-            plot: bool = False,
+            plot: bool,
 
-            mem_buffer_size: int = 50000,
+
 
     ):
         self.env_name = env_name
@@ -90,8 +92,10 @@ class ProximalPolicyOptimizer:
         if self.plot:
             self.pi_loss_history = []
             self.v_loss_history = []
+            self.total_loss_history = []
 
             self.entropy_history = []
+            self.expl_var_history = []
 
             self.surr1_history = []
             self.surr2_history = []
@@ -164,44 +168,13 @@ class ProximalPolicyOptimizer:
             # Basically just adds a dimension to the tensor
             agent_obs = tree_map(lambda x: x.unsqueeze(1), agent_obs)
 
-            # print(agent_obs["img"].shape)
-            # print(dummy_first.shape)
-            # print(len(state))
-            # print("hi")
-            # print(len(state[0]))
-            # print(len(state[1]))
-            # print(len(state[2]))
-            # print(len(state[3]))
-
-            # print(state[1].shape)
-            # print(state[2].shape)
-            # print(state[3].shape)
-
             # Need to run this with no_grad or else the gradient descent will crash during training lol
             with th.no_grad():
                 (pi_h, v_h), state = self.agent.policy.net(
                     agent_obs, state, context={"first": dummy_first})
 
-                # print(state.shape)
-
-                # print(state[0][0].shape)
-                # print(state[0][1][0].shape)
-                # print(state[0][1][1].shape)
-                # # print(len(state[0][1]))
-
-                # print(state[1][0].shape)
-                # print(state[1][1].shape)
-
                 pi_distribution = self.agent.policy.pi_head(pi_h)
                 v_prediction = self.agent.policy.value_head(v_h)
-
-                # print(pi_distribution)
-                # print(pi_distribution["camera"].shape)
-                # print(pi_distribution["buttons"].shape)
-                # print(v_prediction)
-
-            # print(pi_distribution)
-            # print(policy.get_logprob_of_action(pi_distribution, None))
 
             # Get action sampled from policy distribution
             # If deterministic==True, this just uses argmax
@@ -216,8 +189,6 @@ class ProximalPolicyOptimizer:
 
             # Process this so the env can accept it
             minerl_action = self.agent._agent_action_to_env(action)
-
-            # print(minerl_action)
 
             # Take action step in the environment
             obs, reward, done, info = self.env.step(minerl_action)
@@ -246,13 +217,13 @@ class ProximalPolicyOptimizer:
         self.memories.extend(episode_memories)
 
         if self.plot:
-            # Updat the reward plot
+            # Update the reward plot
             self.reward_history.append(total_reward)
             self.reward_plot.set_ydata(self.reward_history)
             self.reward_plot.set_xdata(range(len(self.reward_history)))
 
-            self.ax[1, 1].relim()
-            self.ax[1, 1].autoscale_view(True, True, True)
+            self.ax[1, 2].relim()
+            self.ax[1, 2].autoscale_view(True, True, True)
 
             self.fig.canvas.draw()
             self.fig.canvas.flush_events()
@@ -321,6 +292,12 @@ class ProximalPolicyOptimizer:
                 # Overwrite the rewards now
                 rewards = th.tensor(returns).float().to(device)
 
+                # Calculate the explained variance, to see how accurate the GAE really is...
+                # print(rewards.shape)
+                # print(v_prediction.shape)
+                explained_variance = 1 - \
+                    (rewards-v_prediction).var() / rewards.var()
+
                 # print(rewards)
                 # Get log probs
                 action_log_probs = self.agent.policy.get_logprob_of_action(
@@ -339,9 +316,6 @@ class ProximalPolicyOptimizer:
                     1 - self.eps_clip, 1 + self.eps_clip) * advantages
                 policy_loss = - th.min(surr1, surr2) - self.beta_s * entropy
 
-                # print(type(policy_loss))
-                # print(policy_loss.shape)
-
                 # Calculate clipped value loss
                 value_clipped = (v_old +
                                  (v_prediction - v_old).clamp(-self.value_clip, self.value_clip)).to(device)
@@ -350,17 +324,17 @@ class ProximalPolicyOptimizer:
                 value_loss_2 = (v_prediction.squeeze() - rewards) ** 2
 
                 value_loss = th.mean(th.max(value_loss_1, value_loss_2))
-                # Calculate clipped value loss
-                # value_loss = clipped_value_loss(
-                #     v_prediction, rewards, old_values, self.value_clip)
+
+                loss = policy_loss.mean() + self.value_loss_weight * value_loss
 
                 if self.plot:
                     self.pi_loss_history.append(policy_loss.mean().item())
                     self.v_loss_history.append(value_loss.item())
+                    self.total_loss_history.append(loss.item())
+
+                    self.expl_var_history.append(explained_variance.item())
 
                     self.entropy_history.append(entropy.mean().item())
-
-                loss = policy_loss.mean() + self.value_loss_weight * value_loss
 
                 loss.backward()
 
@@ -369,30 +343,42 @@ class ProximalPolicyOptimizer:
 
             # Update plot at the end of every epoch
             if self.plot:
-                # Update the loss plots
+                # Update policy loss plot
                 self.pi_loss_plot.set_ydata(self.pi_loss_history)
                 self.pi_loss_plot.set_xdata(
-                    list(range(len(self.pi_loss_history))))
-
-                # Update policy loss plot
+                    range(len(self.pi_loss_history)))
                 self.ax[0, 0].relim()
                 self.ax[0, 0].autoscale_view(True, True, True)
 
                 # Update value loss plot
-
                 self.v_loss_plot.set_ydata(self.v_loss_history)
                 self.v_loss_plot.set_xdata(
-                    list(range(len(self.v_loss_history))))
+                    range(len(self.v_loss_history)))
                 self.ax[0, 1].relim()
                 self.ax[0, 1].autoscale_view(True, True, True)
+
+                # Update total loss plot
+                self.total_loss_plot.set_ydata(self.total_loss_history)
+                self.total_loss_plot.set_xdata(
+                    range(len(self.total_loss_history)))
+                self.ax[0, 2].relim()
+                self.ax[0, 2].autoscale_view(True, True, True)
 
                 # Update the entropy plot
                 self.entropy_plot.set_ydata(self.entropy_history)
                 self.entropy_plot.set_xdata(range(len(self.entropy_history)))
-
                 self.ax[1, 0].relim()
                 self.ax[1, 0].autoscale_view(True, True, True)
 
+                # Update the explained variance plot
+                self.expl_var_plot.set_ydata(self.expl_var_history)
+                self.expl_var_plot.set_xdata(
+                    range(len(self.expl_var_history)))
+
+                self.ax[1, 1].relim()
+                self.ax[1, 1].autoscale_view(True, True, True)
+
+                # Actually draw everything
                 self.fig.canvas.draw()
                 self.fig.canvas.flush_events()
             # update_network(value_loss, self.optim_v)
@@ -404,7 +390,7 @@ class ProximalPolicyOptimizer:
         if self.plot:
             # Create a plot to show the progress of the training
             plt.ion()
-            self.fig, self.ax = plt.subplots(2, 2, figsize=(10, 8))
+            self.fig, self.ax = plt.subplots(2, 3, figsize=(10, 8))
 
             # Set up policy loss plot
             self.ax[0, 0].set_autoscale_on(True)
@@ -424,7 +410,15 @@ class ProximalPolicyOptimizer:
             self.v_loss_plot, = self.ax[0, 1].plot(
                 [], [], color="orange")
 
-            # self.ax[0, 0].legend(loc="upper right")
+            # Set up total loss plot
+            self.ax[0, 2].set_autoscale_on(True)
+            self.ax[0, 2].autoscale_view(True, True, True)
+
+            self.ax[0, 2].set_title("Total Loss")
+
+            self.total_loss_plot, = self.ax[0, 2].plot(
+                [], [], color="purple"
+            )
 
             # Setup entropy plot
             self.ax[1, 0].set_autoscale_on(True)
@@ -433,12 +427,19 @@ class ProximalPolicyOptimizer:
 
             self.entropy_plot, = self.ax[1, 0].plot([], [], color="green")
 
-            # Setup reward plot
+            # Setup explained variance plot
             self.ax[1, 1].set_autoscale_on(True)
             self.ax[1, 1].autoscale_view(True, True, True)
-            self.ax[1, 1].set_title("Reward per Episode")
+            self.ax[1, 1].set_title("Explained Variance")
 
-            self.reward_plot,  = self.ax[1, 1].plot([], [], color="red")
+            self.expl_var_plot, = self.ax[1, 1].plot([], [], color="grey")
+
+            # Setup reward plot
+            self.ax[1, 2].set_autoscale_on(True)
+            self.ax[1, 2].autoscale_view(True, True, True)
+            self.ax[1, 2].set_title("Reward per Episode")
+
+            self.reward_plot,  = self.ax[1, 2].plot([], [], color="red")
 
         for i in range(self.ppo_iterations):
             for eps in range(self.episodes):
@@ -459,22 +460,29 @@ class ProximalPolicyOptimizer:
 
 if __name__ == "__main__":
     rc = RewardsCalculator(
-        damage_dealt=1
+        damage_dealt=1,
+        mob_kills=100
     )
     ppo = ProximalPolicyOptimizer(
-        "MineRLPunchCow-v0",
-        "models/foundation-model-2x.model",
-        "weights/foundation-model-2x.weights",
+        "MineRLPunchCowEz-v0",
+        "models/foundation-model-1x.model",
+        "weights/foundation-model-1x.weights",
 
         rc=rc,
         ppo_iterations=100,
         episodes=5,
-        epochs=8,
-        minibatch_size=48,
-        lr=0.000181,
+        epochs=4,
+        minibatch_size=20,
+        lr=0.00001,
+        betas=(0.9, 0.999),
+        beta_s=0.999,
         eps_clip=0.1,
-
-        plot=True
+        value_clip=0.1,
+        value_loss_weight=0.1,
+        gamma=0.99,
+        lam=0.95,
+        mem_buffer_size=2000,
+        plot=True,
     )
 
     ppo.run_train_loop()

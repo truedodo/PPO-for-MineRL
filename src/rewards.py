@@ -1,9 +1,10 @@
 
 # These are stats returned from the minerl environment
+# If you want to add another minecraft stat, it needs to be updated in minerl-combat as well
 stat_names = [
     "damage_dealt",
     "damage_taken",
-    "damage_blocked_by_shield"
+    "mob_kills"
 ]
 
 
