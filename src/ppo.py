@@ -7,6 +7,7 @@ import torch as th
 from torch.utils.data import DataLoader
 import matplotlib.pyplot as plt
 import numpy as np
+import copy
 
 from datetime import datetime
 from tqdm import tqdm
@@ -21,8 +22,8 @@ from lib.tree_util import tree_map  # nopep8
 
 # For debugging purposes
 # th.autograd.set_detect_anomaly(True)
-# device = th.device("cuda:0" if th.cuda.is_available() else "cpu")
-device = th.device("mps")  # apple silicon
+device = th.device("cuda:0" if th.cuda.is_available() else "cpu")
+# device = th.device("mps")  # apple silicon
 
 
 class ProximalPolicyOptimizer:
@@ -141,7 +142,14 @@ class ProximalPolicyOptimizer:
         # Initialize the hidden state vector
         # Note that batch size is 1 here because we are only running the agent
         # on a single episode
-        state = self.agent.policy.initial_state(1)
+        hidden_state = self.agent.policy.initial_state(1)
+
+        # Need to do a little bit of augmentation so the dataloader accepts the initial hidden state
+        # This shouldn't affect anything; initial_state just uses None instead of empty tensors
+        for i in range(len(hidden_state)):
+            hidden_state[i] = list(hidden_state[i])
+            hidden_state[i][0] = th.from_numpy(np.full(
+                (1, 1, 128), False)).to(device)
 
         # I think these are just internal masks that should just be set to false
         dummy_first = th.from_numpy(np.array((False,))).to(device)
@@ -159,23 +167,33 @@ class ProximalPolicyOptimizer:
 
         # This is not really used in training
         # More just for us to estimate the success of an episode
-        total_reward = 0
+        episode_reward = 0
 
         while not done:
             # Preprocess image
             agent_obs = self.agent._env_obs_to_agent(obs)
 
-            # Basically just adds a dimension to the tensor
+            # Basically just adds a dimension to both camera and button tensors
             agent_obs = tree_map(lambda x: x.unsqueeze(1), agent_obs)
 
+            # print("Initial Hidden State:")
+            # for i in range(len(hidden_state)):
+            #     # print(hidden_state[i][0].shape)
+            #     print(hidden_state[i][1][0].shape)
+            #     print(hidden_state[i][1][1].shape)
             # Need to run this with no_grad or else the gradient descent will crash during training lol
             with th.no_grad():
-                (pi_h, v_h), state = self.agent.policy.net(
-                    agent_obs, state, context={"first": dummy_first})
+                (pi_h, v_h), next_hidden_state = self.agent.policy.net(
+                    agent_obs, hidden_state, context={"first": dummy_first})
 
                 pi_distribution = self.agent.policy.pi_head(pi_h)
                 v_prediction = self.agent.policy.value_head(v_h)
 
+            # print("Next Hidden State:")
+            # for i in range(len(next_hidden_state)):
+            #     print(next_hidden_state[i][0].shape)
+            #     print(next_hidden_state[i][1][0].shape)
+            #     print(next_hidden_state[i][1][1].shape)
             # Get action sampled from policy distribution
             # If deterministic==True, this just uses argmax
             action = self.agent.policy.pi_head.sample(
@@ -195,10 +213,16 @@ class ProximalPolicyOptimizer:
 
             # Immediately disregard the reward function from the environment
             reward = self.rc.get_rewards(obs, True)
-            total_reward += reward
+            episode_reward += reward
 
-            memory = Memory(agent_obs, state, pi_h, v_h, action, action_log_prob,
+            # Important! When we store a memory, we want the hidden state at the time of the observation as input! Not the step after
+            memory = Memory(agent_obs, hidden_state, pi_h, v_h, action, action_log_prob,
                             reward, 0, done, v_prediction)
+
+            # Now, update the state to the new state
+            hidden_state = next_hidden_state
+
+            # print("Memory Hidden State: ", memory.hidden_state)
 
             episode_memories.append(memory)
             # Finally, render the environment to the screen
@@ -208,7 +232,7 @@ class ProximalPolicyOptimizer:
         # Update all memories so we know the total reward of its episode
         # Intuition: memories from episodes where 0 reward was achieved are less valuable
         for mem in episode_memories:
-            mem.total_reward = total_reward
+            mem.total_reward = episode_reward
 
         # Reset the reward calculator once we are done with the episode
         self.rc.clear()
@@ -218,7 +242,7 @@ class ProximalPolicyOptimizer:
 
         if self.plot:
             # Update the reward plot
-            self.reward_history.append(total_reward)
+            self.reward_history.append(episode_reward)
             self.reward_plot.set_ydata(self.reward_history)
             self.reward_plot.set_xdata(range(len(self.reward_history)))
 
@@ -230,20 +254,13 @@ class ProximalPolicyOptimizer:
 
         end = datetime.now()
         print(
-            f"✅ Episode finished (duration - {end - start} | memories - {len(episode_memories)} | total reward - {total_reward})")
+            f"✅ Episode finished (duration - {end - start} | memories - {len(episode_memories)} | total reward - {episode_reward})")
 
     def learn(self):
 
         # Create dataloader from the memory buffer
         data = MemoryDataset(self.memories)
         dl = DataLoader(data, batch_size=self.minibatch_size, shuffle=True)
-
-        # dummy_first = th.from_numpy(
-        #     np.tile(np.array((False,)), self.minibatch_size)).to(device)
-
-        # dummy_first = th.from_numpy(np.array((False,))).to(device)
-        # dummy_first = dummy_first.unsqueeze(1)
-        # # print(dummy_first.shape)
 
         # Shorthand
         policy = self.agent.policy
@@ -290,13 +307,13 @@ class ProximalPolicyOptimizer:
 
                 # print(rewards)
                 # Overwrite the rewards now
-                rewards = th.tensor(returns).float().to(device)
+                returns = th.tensor(returns).float().to(device)
 
                 # Calculate the explained variance, to see how accurate the GAE really is...
                 # print(rewards.shape)
                 # print(v_prediction.shape)
                 explained_variance = 1 - \
-                    (rewards-v_prediction).var() / rewards.var()
+                    th.sub(returns, v_prediction).var() / returns.var()
 
                 # print(rewards)
                 # Get log probs
@@ -310,7 +327,7 @@ class ProximalPolicyOptimizer:
                 ratios = (action_log_probs -
                           old_action_log_probs).exp().to(device)
                 advantages = normalize(
-                    rewards - v_prediction.detach().to(device))
+                    returns - v_prediction.detach().to(device))
                 surr1 = ratios * advantages
                 surr2 = ratios.clamp(
                     1 - self.eps_clip, 1 + self.eps_clip) * advantages
@@ -320,8 +337,8 @@ class ProximalPolicyOptimizer:
                 value_clipped = (v_old +
                                  (v_prediction - v_old).clamp(-self.value_clip, self.value_clip)).to(device)
 
-                value_loss_1 = (value_clipped.squeeze() - rewards) ** 2
-                value_loss_2 = (v_prediction.squeeze() - rewards) ** 2
+                value_loss_1 = (value_clipped.squeeze() - returns) ** 2
+                value_loss_2 = (v_prediction.squeeze() - returns) ** 2
 
                 value_loss = th.mean(th.max(value_loss_1, value_loss_2))
 
@@ -390,7 +407,7 @@ class ProximalPolicyOptimizer:
         if self.plot:
             # Create a plot to show the progress of the training
             plt.ion()
-            self.fig, self.ax = plt.subplots(2, 3, figsize=(10, 8))
+            self.fig, self.ax = plt.subplots(2, 3, figsize=(12, 8))
 
             # Set up policy loss plot
             self.ax[0, 0].set_autoscale_on(True)
@@ -481,7 +498,7 @@ if __name__ == "__main__":
         value_loss_weight=0.1,
         gamma=0.99,
         lam=0.95,
-        mem_buffer_size=2000,
+        mem_buffer_size=10000,
         plot=True,
     )
 
