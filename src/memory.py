@@ -11,9 +11,8 @@ class Memory:
     This class represents a single frame/step of the agent
     A full episode should be of type List[Memory]
     """
-    # obs: np.ndarray
-    # state: np.ndarray
-    # obs: th.Tensor
+
+    # Raw pixel observation for this frame
     agent_obs: dict
     hidden_state: list
     pi_h: th.tensor

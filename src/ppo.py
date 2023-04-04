@@ -25,6 +25,8 @@ from lib.tree_util import tree_map  # nopep8
 device = th.device("cuda:0" if th.cuda.is_available() else "cpu")
 # device = th.device("mps")  # apple silicon
 
+TRAIN_WHOLE_MODEL = False
+
 
 class ProximalPolicyOptimizer:
     def __init__(
@@ -42,6 +44,7 @@ class ProximalPolicyOptimizer:
             epochs: int,
             minibatch_size: int,
             lr: float,
+            weight_decay: float,
             betas: tuple,
             beta_s: float,
             eps_clip: float,
@@ -62,13 +65,7 @@ class ProximalPolicyOptimizer:
         self.env_name = env_name
         self.env = gym.make(env_name)
 
-        # Set the rewards calcualtor
-        if rc is None:
-            # Basic default reward function
-            rc = RewardsCalculator(
-                damage_dealt=1,
-                damage_taken=-1,
-            )
+        # Load the reward calculator
         self.rc = rc
 
         # Load hyperparameters unchanged
@@ -77,6 +74,7 @@ class ProximalPolicyOptimizer:
         self.epochs = epochs
         self.minibatch_size = minibatch_size
         self.lr = lr
+        self.weight_decay = weight_decay
         self.betas = betas
         self.beta_s = beta_s
         self.eps_clip = eps_clip
@@ -113,11 +111,16 @@ class ProximalPolicyOptimizer:
                                  pi_head_kwargs=pi_head_kwargs)
         self.agent.load_weights(weights_path)
 
-        # This can be adjusted later to only train certain heads
-        # Unifying all parameters under one optimizer gives us much more flexibility
-        trainable_parameters = self.agent.policy.parameters()
+        policy = self.agent.policy
 
-        self.optim = th.optim.Adam(trainable_parameters, lr=lr, betas=betas)
+        if TRAIN_WHOLE_MODEL:
+            self.trainable_parameters = list(policy.parameters())
+        else:
+            self.trainable_parameters = list(
+                policy.pi_head.parameters()) + list(policy.value_head.parameters())
+
+        self.optim = th.optim.Adam(
+            self.trainable_parameters, lr=lr, betas=betas, weight_decay=weight_decay)
 
         # self.optim_pi = th.optim.Adam(
         #     self.agent.policy.pi_head.parameters(), lr=lr, betas=betas)
@@ -151,7 +154,7 @@ class ProximalPolicyOptimizer:
             hidden_state[i][0] = th.from_numpy(np.full(
                 (1, 1, 128), False)).to(device)
 
-        # I think these are just internal masks that should just be set to false
+        # This is a dummy tensor of shape (batchsize, 1) which was used as a mask internally
         dummy_first = th.from_numpy(np.array((False,))).to(device)
         dummy_first = dummy_first.unsqueeze(1)
 
@@ -229,13 +232,36 @@ class ProximalPolicyOptimizer:
             # Comment this out if you are boring
             self.env.render()
 
-        # Update all memories so we know the total reward of its episode
-        # Intuition: memories from episodes where 0 reward was achieved are less valuable
-        for mem in episode_memories:
-            mem.total_reward = episode_reward
-
         # Reset the reward calculator once we are done with the episode
         self.rc.clear()
+
+        # Calculate the generalized advantage estimate
+        # This used to be done during each minibatch; however, the GAE should be more accurate
+        # if we calculate it over the entire episode... I think?
+        gae = 0
+        returns = []
+
+        v_preds = list(map(lambda mem: mem.value, episode_memories))
+        rewards = list(map(lambda mem: mem.reward, episode_memories))
+
+        masks = list(map(lambda mem: 1 - float(mem.done), episode_memories))
+        for i in reversed(range(len(episode_memories))):
+
+            # hacky but necessary since we don't have "next_state"
+            v_next = v_preds[i + 1] if i != len(episode_memories) - 1 else 0
+
+            delta = rewards[i] + self.gamma * \
+                v_next * masks[i] - v_preds[i]
+            gae = delta + self.gamma * self.lam * masks[i] * gae
+            returns.insert(0, gae + v_preds[i])
+
+        # Make changes to the memories for this episode before adding them to main buffer
+        for i in range(len(episode_memories)):
+            # Replace raw reward with the GAE
+            episode_memories[i].reward = returns[i]
+
+            # Remember the total reward for this episode
+            episode_memories[i].total_reward = episode_reward
 
         # Update internal memory buffer
         self.memories.extend(episode_memories)
@@ -285,29 +311,22 @@ class ProximalPolicyOptimizer:
 
                 # print(dummy_first.shape)
 
-                (pi_h, v_h), state_out = policy.net(
-                    agent_obs, state, context={"first": dummy_first})
+                if TRAIN_WHOLE_MODEL:
+                    (pi_h, v_h), state_out = policy.net(
+                        agent_obs, state, context={"first": dummy_first})
+
+                else:
+                    # Use the hidden state calculated at the time since the model shouldn't change
+                    pi_h, v_h = recorded_pi_h, recorded_v_h
 
                 pi_distribution = self.agent.policy.pi_head(pi_h)
                 v_prediction = self.agent.policy.value_head(v_h).to(device)
 
                 masks = list(map(lambda d: 1-float(d), dones))
 
-                returns = []
-                gae = 0
-
-                for i in reversed(range(len(rewards))):
-                    # hacky but necessary since we don't have "next_state"
-                    v_next = v_old[i + 1] if i != len(rewards) - 1 else 0
-
-                    delta = rewards[i] + self.gamma * \
-                        v_next * masks[i] - v_old[i]
-                    gae = delta + self.gamma * self.lam * masks[i] * gae
-                    returns.insert(0, gae + v_old[i])
-
-                # print(rewards)
                 # Overwrite the rewards now
-                returns = th.tensor(returns).float().to(device)
+                returns = rewards
+                # returns = th.tensor(rewards).float().to(device)
 
                 # Calculate the explained variance, to see how accurate the GAE really is...
                 # print(rewards.shape)
@@ -355,8 +374,9 @@ class ProximalPolicyOptimizer:
 
                 loss.backward()
 
+                # th.nn.utils.clip_grad_norm_(
+                #     self.trainable_parameters, MAX_GRAD_NORM)
                 self.optim.step()
-                self.optim.zero_grad()
 
             # Update plot at the end of every epoch
             if self.plot:
@@ -466,7 +486,7 @@ class ProximalPolicyOptimizer:
 
             # Trim the size of memory buffer:
             if len(self.memories) > self.mem_buffer_size:
-                self.memories.sort(key=lambda mem: mem.total_reward)
+                # self.memories.sort(key=lambda mem: mem.total_reward)
                 self.memories = self.memories[-self.mem_buffer_size:]
                 print(
                     f"⚠️ Trimmed memory buffer to length {self.mem_buffer_size} (worst - {self.memories[0].total_reward} | best - {self.memories[-1].total_reward})")
@@ -478,7 +498,6 @@ class ProximalPolicyOptimizer:
 if __name__ == "__main__":
     rc = RewardsCalculator(
         damage_dealt=1,
-        mob_kills=100
     )
     ppo = ProximalPolicyOptimizer(
         "MineRLPunchCowEz-v0",
@@ -490,12 +509,13 @@ if __name__ == "__main__":
         episodes=5,
         epochs=4,
         minibatch_size=20,
-        lr=0.00001,
+        lr=0.0001,
+        weight_decay=0.00001,
         betas=(0.9, 0.999),
         beta_s=0.999,
-        eps_clip=0.1,
+        eps_clip=0.2,
         value_clip=0.1,
-        value_loss_weight=0.1,
+        value_loss_weight=0.15,
         gamma=0.99,
         lam=0.95,
         mem_buffer_size=10000,
