@@ -238,6 +238,9 @@ class ProximalPolicyOptimizer:
         # Calculate the generalized advantage estimate
         # This used to be done during each minibatch; however, the GAE should be more accurate
         # if we calculate it over the entire episode... I think?
+
+        # It is not "more accurate," it MUST be calculated with rollouts after it, so in 
+        # randomized minibatch would just be nonsense...
         gae = 0
         returns = []
 
@@ -353,6 +356,7 @@ class ProximalPolicyOptimizer:
                 policy_loss = - th.min(surr1, surr2) - self.beta_s * entropy
 
                 # Calculate clipped value loss
+                # TODO we do not need to clip this - might even be worse than not
                 value_clipped = (v_old +
                                  (v_prediction - v_old).clamp(-self.value_clip, self.value_clip)).to(device)
 
@@ -479,6 +483,10 @@ class ProximalPolicyOptimizer:
             self.reward_plot,  = self.ax[1, 2].plot([], [], color="red")
 
         for i in range(self.ppo_iterations):
+
+            # TODO this is not the correct learning structure for PPO
+            # we should be doing 1) many rollout at once and 
+            # 2) doing learning during episodes
             for eps in range(self.episodes):
                 print(
                     f"🎬 Starting {self.env_name} episode {eps + 1}/{self.episodes}")
