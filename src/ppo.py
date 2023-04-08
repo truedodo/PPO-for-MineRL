@@ -14,6 +14,7 @@ from tqdm import tqdm
 from rewards import RewardsCalculator
 from memory import Memory, MemoryDataset
 from util import to_torch_tensor, normalize, safe_reset, hard_reset
+from vectorized_minerl import *
 
 sys.path.insert(0, "vpt")  # nopep8
 
@@ -39,8 +40,8 @@ class ProximalPolicyOptimizer:
             rc: RewardsCalculator,
 
             # Hyperparameters
-            ppo_iterations: int,
-            episodes: int,
+            num_rollouts: int, 
+            num_steps: int, # the number of steps per rollout, T 
             epochs: int,
             minibatch_size: int,
             lr: float,
@@ -58,19 +59,21 @@ class ProximalPolicyOptimizer:
 
             # Optional: plot stuff
             plot: bool,
+            num_envs: int,
 
 
 
     ):
         self.env_name = env_name
-        self.env = gym.make(env_name)
+        self.num_envs = num_envs
+        self.envs = init_vec_envs(self.env_name, self.num_envs)
 
         # Load the reward calculator
         self.rc = rc
 
         # Load hyperparameters unchanged
-        self.ppo_iterations = ppo_iterations
-        self.episodes = episodes
+        self.num_rollouts = num_rollouts
+        self.num_steps = num_steps
         self.epochs = epochs
         self.minibatch_size = minibatch_size
         self.lr = lr
@@ -107,7 +110,7 @@ class ProximalPolicyOptimizer:
         pi_head_kwargs = agent_parameters["model"]["args"]["pi_head_opts"]
         pi_head_kwargs["temperature"] = float(pi_head_kwargs["temperature"])
 
-        self.agent = MineRLAgent(self.env, policy_kwargs=policy_kwargs,
+        self.agent = MineRLAgent(self.envs, policy_kwargs=policy_kwargs,
                                  pi_head_kwargs=pi_head_kwargs)
         self.agent.load_weights(weights_path)
 
@@ -133,19 +136,23 @@ class ProximalPolicyOptimizer:
         # Potential memory issues / optimizations around here...
         self.memories: List[Memory] = []
 
-    def run_episode(self, hard_reset: bool = False):
+    def rollout(self,hard_reset: bool = False):
         """
-        Runs a single episode and records the memories 
+        Runs a rollout on the vectorized environments for `num_steps` timesteps and records the memories
         """
         start = datetime.now()
 
         # Temporary buffer to put the memories in before extending self.memories
-        episode_memories: List[Memory] = []
+        rollout_memories: List[Memory] = []
 
         # Initialize the hidden state vector
         # Note that batch size is 1 here because we are only running the agent
         # on a single episode
+        # TODO use the hidden state(s?) saved from previous rollout?
         hidden_state = self.agent.policy.initial_state(1)
+
+
+        ## MineRL specific technical setup
 
         # Need to do a little bit of augmentation so the dataloader accepts the initial hidden state
         # This shouldn't affect anything; initial_state just uses None instead of empty tensors
@@ -154,83 +161,57 @@ class ProximalPolicyOptimizer:
             hidden_state[i][0] = th.from_numpy(np.full(
                 (1, 1, 128), False)).to(device)
 
-        # This is a dummy tensor of shape (batchsize, 1) which was used as a mask internally
-        dummy_first = th.from_numpy(np.array((False,))).to(device)
-        dummy_first = dummy_first.unsqueeze(1)
 
         # Start the episode with gym
-        # obs = self.env.reset()
-        if hard_reset:
-            self.env.close()
-            self.env = gym.make(self.env_name)
-            obs = self.env.reset()
-        else:
-            obs = self.env.reset()
-        done = False
+        # `obs` and `done` are both vectors, since we have vectorized envs
+        obss = reset_vec_envs(self.envs)
+        dones = np.zeros(self.num_envs)
 
         # This is not really used in training
         # More just for us to estimate the success of an episode
-        episode_reward = 0
+        episode_reward = np.zeros(self.num_envs)
 
-        while not done:
+        for step in range(self.num_steps):
             # Preprocess image
-            agent_obs = self.agent._env_obs_to_agent(obs)
+            agent_obss = [self.agent._env_obs_to_agent(obs) for obs in obss]
 
             # Basically just adds a dimension to both camera and button tensors
-            agent_obs = tree_map(lambda x: x.unsqueeze(1), agent_obs)
+            agent_obss = [tree_map(lambda x: x.unsqueeze(1), agent_obs) for agent_obs in agent_obss]
 
-            # print("Initial Hidden State:")
-            # for i in range(len(hidden_state)):
-            #     # print(hidden_state[i][0].shape)
-            #     print(hidden_state[i][1][0].shape)
-            #     print(hidden_state[i][1][1].shape)
             # Need to run this with no_grad or else the gradient descent will crash during training lol
-            with th.no_grad():
-                (pi_h, v_h), next_hidden_state = self.agent.policy.net(
-                    agent_obs, hidden_state, context={"first": dummy_first})
+            pi_hs, v_hs, pi_dists, v_preds, next_hidden_states = run_base_vec_envs(agent_obss, hidden_states, self.agent, device)
 
-                pi_distribution = self.agent.policy.pi_head(pi_h)
-                v_prediction = self.agent.policy.value_head(v_h)
-
-            # print("Next Hidden State:")
-            # for i in range(len(next_hidden_state)):
-            #     print(next_hidden_state[i][0].shape)
-            #     print(next_hidden_state[i][1][0].shape)
-            #     print(next_hidden_state[i][1][1].shape)
             # Get action sampled from policy distribution
             # If deterministic==True, this just uses argmax
-            action = self.agent.policy.pi_head.sample(
-                pi_distribution, deterministic=False)
+            actions = [self.agent.policy.pi_head.sample(pi_distribution, deterministic=False) for pi_distribution in pi_dists]
 
-            # print(action)
-
-            # Get log probability of taking this action given pi
-            action_log_prob = self.agent.policy.get_logprob_of_action(
-                pi_distribution, action)
+            # Get log probability of taking this action given pi (vectorized)
+            action_log_probs = [self.agent.policy.get_logprob_of_action(
+                pi_distribution, action) for pi_distribution, action in zip(pi_dists, actions)]
 
             # Process this so the env can accept it
-            minerl_action = self.agent._agent_action_to_env(action)
+            minerl_actions = [self.agent._agent_action_to_env(action) for action in actions]
 
             # Take action step in the environment
-            obs, reward, done, info = self.env.step(minerl_action)
+            obss, rewards, dones = step_vec_envs(minerl_actions)
 
             # Immediately disregard the reward function from the environment
-            reward = self.rc.get_rewards(obs, True)
-            episode_reward += reward
+            rewards = [self.rc.get_rewards(obs, True) for obs in obss]
 
             # Important! When we store a memory, we want the hidden state at the time of the observation as input! Not the step after
-            memory = Memory(agent_obs, hidden_state, pi_h, v_h, action, action_log_prob,
-                            reward, 0, done, v_prediction)
+            memories = generate_vec_memories(agent_obss, hidden_states, pi_hs, v_hs, actions, action_log_probs,
+                            rewards, 0, dones, v_preds)
 
             # Now, update the state to the new state
-            hidden_state = next_hidden_state
+            hidden_states = [next_hidden_state for next_hidden_state in next_hidden_states]
 
-            # print("Memory Hidden State: ", memory.hidden_state)
+            # TODO should not just extend, need to keep env structure to
+            # calculage GAE
+            rollout_memories.extend(memories)
 
-            episode_memories.append(memory)
-            # Finally, render the environment to the screen
+            # Finally, render the environments to the screen
             # Comment this out if you are boring
-            self.env.render()
+            [env.render() for env in self.envs]
 
         # Reset the reward calculator once we are done with the episode
         self.rc.clear()
@@ -244,14 +225,14 @@ class ProximalPolicyOptimizer:
         gae = 0
         returns = []
 
-        v_preds = list(map(lambda mem: mem.value, episode_memories))
-        rewards = list(map(lambda mem: mem.reward, episode_memories))
+        v_preds = list(map(lambda mem: mem.value, rollout_memories))
+        rewards = list(map(lambda mem: mem.reward, rollout_memories))
 
-        masks = list(map(lambda mem: 1 - float(mem.done), episode_memories))
-        for i in reversed(range(len(episode_memories))):
+        masks = list(map(lambda mem: 1 - float(mem.done), rollout_memories))
+        for i in reversed(range(len(rollout_memories))):
 
             # hacky but necessary since we don't have "next_state"
-            v_next = v_preds[i + 1] if i != len(episode_memories) - 1 else 0
+            v_next = v_preds[i + 1] if i != len(rollout_memories) - 1 else 0
 
             delta = rewards[i] + self.gamma * \
                 v_next * masks[i] - v_preds[i]
@@ -259,15 +240,15 @@ class ProximalPolicyOptimizer:
             returns.insert(0, gae + v_preds[i])
 
         # Make changes to the memories for this episode before adding them to main buffer
-        for i in range(len(episode_memories)):
+        for i in range(len(rollout_memories)):
             # Replace raw reward with the GAE
-            episode_memories[i].reward = returns[i]
+            rollout_memories[i].reward = returns[i]
 
             # Remember the total reward for this episode
-            episode_memories[i].total_reward = episode_reward
+            rollout_memories[i].total_reward = episode_reward
 
         # Update internal memory buffer
-        self.memories.extend(episode_memories)
+        self.memories.extend(rollout_memories)
 
         if self.plot:
             # Update the reward plot
@@ -283,12 +264,14 @@ class ProximalPolicyOptimizer:
 
         end = datetime.now()
         print(
-            f"✅ Episode finished (duration - {end - start} | memories - {len(episode_memories)} | total reward - {episode_reward})")
+            f"✅ Episode finished (duration - {end - start} | memories - {len(rollout_memories)} | total reward - {episode_reward})")
 
     def learn(self):
 
         # Create dataloader from the memory buffer
         data = MemoryDataset(self.memories)
+
+        # TODO should not be shuffling, rather rolling out again
         dl = DataLoader(data, batch_size=self.minibatch_size, shuffle=True)
 
         # Shorthand
@@ -360,6 +343,7 @@ class ProximalPolicyOptimizer:
                 value_clipped = (v_old +
                                  (v_prediction - v_old).clamp(-self.value_clip, self.value_clip)).to(device)
 
+                # TODO what is this?
                 value_loss_1 = (value_clipped.squeeze() - returns) ** 2
                 value_loss_2 = (v_prediction.squeeze() - returns) ** 2
 
@@ -424,83 +408,75 @@ class ProximalPolicyOptimizer:
                 self.fig.canvas.flush_events()
             # update_network(value_loss, self.optim_v)
 
+    def init_plot(self):
+        # Create a plot to show the progress of the training
+        plt.ion()
+        self.fig, self.ax = plt.subplots(2, 3, figsize=(12, 8))
+
+        # Set up policy loss plot
+        self.ax[0, 0].set_autoscale_on(True)
+        self.ax[0, 0].autoscale_view(True, True, True)
+
+        self.ax[0, 0].set_title("Policy Loss")
+
+        self.pi_loss_plot, = self.ax[0, 0].plot(
+            [], [], color="blue")
+
+        # Setup value loss plot
+        self.ax[0, 1].set_autoscale_on(True)
+        self.ax[0, 1].autoscale_view(True, True, True)
+
+        self.ax[0, 1].set_title("Value Loss")
+
+        self.v_loss_plot, = self.ax[0, 1].plot(
+            [], [], color="orange")
+
+        # Set up total loss plot
+        self.ax[0, 2].set_autoscale_on(True)
+        self.ax[0, 2].autoscale_view(True, True, True)
+
+        self.ax[0, 2].set_title("Total Loss")
+
+        self.total_loss_plot, = self.ax[0, 2].plot(
+            [], [], color="purple"
+        )
+
+        # Setup entropy plot
+        self.ax[1, 0].set_autoscale_on(True)
+        self.ax[1, 0].autoscale_view(True, True, True)
+        self.ax[1, 0].set_title("Entropy")
+
+        self.entropy_plot, = self.ax[1, 0].plot([], [], color="green")
+
+        # Setup explained variance plot
+        self.ax[1, 1].set_autoscale_on(True)
+        self.ax[1, 1].autoscale_view(True, True, True)
+        self.ax[1, 1].set_title("Explained Variance")
+
+        self.expl_var_plot, = self.ax[1, 1].plot([], [], color="grey")
+
+        # Setup reward plot
+        self.ax[1, 2].set_autoscale_on(True)
+        self.ax[1, 2].autoscale_view(True, True, True)
+        self.ax[1, 2].set_title("Reward per Episode")
+
+        self.reward_plot,  = self.ax[1, 2].plot([], [], color="red")
+
     def run_train_loop(self):
         """
         Runs the basic PPO training loop
         """
         if self.plot:
-            # Create a plot to show the progress of the training
-            plt.ion()
-            self.fig, self.ax = plt.subplots(2, 3, figsize=(12, 8))
+            self.init_plot()
 
-            # Set up policy loss plot
-            self.ax[0, 0].set_autoscale_on(True)
-            self.ax[0, 0].autoscale_view(True, True, True)
+        for i in range(self.num_rollouts):
 
-            self.ax[0, 0].set_title("Policy Loss")
-
-            self.pi_loss_plot, = self.ax[0, 0].plot(
-                [], [], color="blue")
-
-            # Setup value loss plot
-            self.ax[0, 1].set_autoscale_on(True)
-            self.ax[0, 1].autoscale_view(True, True, True)
-
-            self.ax[0, 1].set_title("Value Loss")
-
-            self.v_loss_plot, = self.ax[0, 1].plot(
-                [], [], color="orange")
-
-            # Set up total loss plot
-            self.ax[0, 2].set_autoscale_on(True)
-            self.ax[0, 2].autoscale_view(True, True, True)
-
-            self.ax[0, 2].set_title("Total Loss")
-
-            self.total_loss_plot, = self.ax[0, 2].plot(
-                [], [], color="purple"
-            )
-
-            # Setup entropy plot
-            self.ax[1, 0].set_autoscale_on(True)
-            self.ax[1, 0].autoscale_view(True, True, True)
-            self.ax[1, 0].set_title("Entropy")
-
-            self.entropy_plot, = self.ax[1, 0].plot([], [], color="green")
-
-            # Setup explained variance plot
-            self.ax[1, 1].set_autoscale_on(True)
-            self.ax[1, 1].autoscale_view(True, True, True)
-            self.ax[1, 1].set_title("Explained Variance")
-
-            self.expl_var_plot, = self.ax[1, 1].plot([], [], color="grey")
-
-            # Setup reward plot
-            self.ax[1, 2].set_autoscale_on(True)
-            self.ax[1, 2].autoscale_view(True, True, True)
-            self.ax[1, 2].set_title("Reward per Episode")
-
-            self.reward_plot,  = self.ax[1, 2].plot([], [], color="red")
-
-        for i in range(self.ppo_iterations):
-
-            # TODO this is not the correct learning structure for PPO
-            # we should be doing 1) many rollout at once and 
-            # 2) doing learning during episodes
-            for eps in range(self.episodes):
-                print(
-                    f"🎬 Starting {self.env_name} episode {eps + 1}/{self.episodes}")
-                self.run_episode(hard_reset=eps == 0)
-
-            # Trim the size of memory buffer:
-            if len(self.memories) > self.mem_buffer_size:
-                # self.memories.sort(key=lambda mem: mem.total_reward)
-                self.memories = self.memories[-self.mem_buffer_size:]
-                print(
-                    f"⚠️ Trimmed memory buffer to length {self.mem_buffer_size} (worst - {self.memories[0].total_reward} | best - {self.memories[-1].total_reward})")
-
+            print(f"🎬 Starting {self.env_name} rollout {i + 1}/{self.num_rollouts}")
+            self.rollout() # hard reset?
             self.learn()
-            # self.memories.clear()
+
+            # clear memories after every rollout
+            self.memories.clear()
 
 
 if __name__ == "__main__":
@@ -511,10 +487,10 @@ if __name__ == "__main__":
         "MineRLPunchCowEz-v0",
         "models/foundation-model-1x.model",
         "weights/foundation-model-1x.weights",
-
+        num_envs=3,
         rc=rc,
-        ppo_iterations=100,
-        episodes=5,
+        num_rollouts=100,
+        num_steps=100,
         epochs=4,
         minibatch_size=20,
         lr=0.0001,
