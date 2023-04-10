@@ -150,15 +150,15 @@ class ProximalPolicyOptimizer:
         # Only run this in the beginning
         if next_obs is None:
             # Initialize the hidden state vector
-            hidden_state = self.agent.policy.initial_state(1)
+            next_hidden_state = self.agent.policy.initial_state(1)
 
             ## MineRL specific technical setup
 
             # Need to do a little bit of augmentation so the dataloader accepts the initial hidden state
             # This shouldn't affect anything; initial_state just uses None instead of empty tensors
-            for i in range(len(hidden_state)):
-                hidden_state[i] = list(hidden_state[i])
-                hidden_state[i][0] = th.from_numpy(np.full(
+            for i in range(len(next_hidden_state)):
+                next_hidden_state[i] = list(next_hidden_state[i])
+                next_hidden_state[i][0] = th.from_numpy(np.full(
                     (1, 1, 128), False)).to(device)
 
 
@@ -184,6 +184,7 @@ class ProximalPolicyOptimizer:
         for _ in range(self.num_steps):
             obs = next_obs
             done = next_done
+            hidden_state = next_hidden_state
 
             # We have to do some resetting...
             if done:
@@ -235,9 +236,6 @@ class ProximalPolicyOptimizer:
             memory = Memory(agent_obs, hidden_state, pi_h, v_h, action, action_log_prob,
                             reward, 0, done, v_prediction)
 
-            # Now, update the state to the new state
-            hidden_state = next_hidden_state
-
             rollout_memories.append(memory)
 
             # Finally, render the environment to the screen
@@ -255,6 +253,8 @@ class ProximalPolicyOptimizer:
 
         # It is not "more accurate," it MUST be calculated with rollouts after it, so in 
         # randomized minibatch would just be nonsense...
+        
+        # TODO need to use next_obs and next_done for this
         gae = 0
         returns = []
 
@@ -265,7 +265,7 @@ class ProximalPolicyOptimizer:
         for i in reversed(range(len(rollout_memories))):
 
             # hacky but necessary since we don't have "next_state"
-            v_next = v_preds[i + 1] if i != len(rollout_memories) - 1 else 0
+            v_next = v_preds[i + 1] if i != len(rollout_memories) - 1 else 0 # TODO insert next_obs here?
 
             delta = rewards[i] + self.gamma * \
                 v_next * masks[i] - v_preds[i]
@@ -298,7 +298,7 @@ class ProximalPolicyOptimizer:
 
         end = datetime.now()
         print(
-            f"✅ Episode finished (duration - {end - start} | memories - {len(rollout_memories)} | total reward - {episode_reward})")
+            f"✅ Rollout finished (duration - {end - start} | memories - {len(rollout_memories)} | total reward - {episode_reward})")
         
         return next_obs, next_done, next_hidden_state
 
@@ -526,7 +526,7 @@ class ProximalPolicyOptimizer:
             dones = dones_buffer
             states = states_buffer
 
-            self.learn(obss, dones)
+            self.learn()
 
             # clear memories after every rollout
             self.memories.clear()
@@ -535,7 +535,9 @@ class ProximalPolicyOptimizer:
 if __name__ == "__main__":
     rc = RewardsCalculator(
         damage_dealt=1,
+        mob_kills=10000
     )
+    rc.set_time_punishment(-10)
     ppo = ProximalPolicyOptimizer(
         "MineRLPunchCowEz-v0",
         "models/foundation-model-1x.model",
