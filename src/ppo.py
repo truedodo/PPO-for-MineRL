@@ -136,82 +136,115 @@ class ProximalPolicyOptimizer:
         # Potential memory issues / optimizations around here...
         self.memories: List[Memory] = []
 
-    def rollout(self,hard_reset: bool = False):
+    def rollout(self, env, next_obs=None, next_done=False, next_hidden_state=None, hard_reset: bool = False):
         """
         Runs a rollout on the vectorized environments for `num_steps` timesteps and records the memories
+
+        Returns `next_obs` and `next_done` for starting the next section of rollouts
         """
         start = datetime.now()
 
         # Temporary buffer to put the memories in before extending self.memories
         rollout_memories: List[Memory] = []
 
-        # Initialize the hidden state vector
-        # Note that batch size is 1 here because we are only running the agent
-        # on a single episode
-        # TODO use the hidden state(s?) saved from previous rollout?
-        hidden_state = self.agent.policy.initial_state(1)
+        # Only run this in the beginning
+        if next_obs is None:
+            # Initialize the hidden state vector
+            hidden_state = self.agent.policy.initial_state(1)
+
+            ## MineRL specific technical setup
+
+            # Need to do a little bit of augmentation so the dataloader accepts the initial hidden state
+            # This shouldn't affect anything; initial_state just uses None instead of empty tensors
+            for i in range(len(hidden_state)):
+                hidden_state[i] = list(hidden_state[i])
+                hidden_state[i][0] = th.from_numpy(np.full(
+                    (1, 1, 128), False)).to(device)
 
 
-        ## MineRL specific technical setup
+            if hard_reset:
+                env.close()
+                env = gym.make(self.env_name)
+                next_obs = env.reset()
+            else:
+                next_obs = env.reset()
+            
+            next_done = False
 
-        # Need to do a little bit of augmentation so the dataloader accepts the initial hidden state
-        # This shouldn't affect anything; initial_state just uses None instead of empty tensors
-        for i in range(len(hidden_state)):
-            hidden_state[i] = list(hidden_state[i])
-            hidden_state[i][0] = th.from_numpy(np.full(
-                (1, 1, 128), False)).to(device)
 
 
-        # Start the episode with gym
-        # `obs` and `done` are both vectors, since we have vectorized envs
-        obss = reset_vec_envs(self.envs)
-        dones = np.zeros(self.num_envs)
+        # This is a dummy tensor of shape (batchsize, 1) which was used as a mask internally
+        dummy_first = th.from_numpy(np.array((False,))).to(device)
+        dummy_first = dummy_first.unsqueeze(1)
 
         # This is not really used in training
         # More just for us to estimate the success of an episode
-        episode_reward = np.zeros(self.num_envs)
+        episode_reward = 0
 
-        for step in range(self.num_steps):
+        for _ in range(self.num_steps):
+            obs = next_obs
+            done = next_done
+
+            # We have to do some resetting...
+            if done:
+                next_obs = env.reset()
+                hidden_state = self.agent.policy.initial_state(1)
+                for i in range(len(hidden_state)):
+                    hidden_state[i] = list(hidden_state[i])
+                    hidden_state[i][0] = th.from_numpy(np.full(
+                        (1, 1, 128), False)).to(device)
+
+
             # Preprocess image
-            agent_obss = [self.agent._env_obs_to_agent(obs) for obs in obss]
+            agent_obs = self.agent._env_obs_to_agent(obs)
 
             # Basically just adds a dimension to both camera and button tensors
-            agent_obss = [tree_map(lambda x: x.unsqueeze(1), agent_obs) for agent_obs in agent_obss]
+            agent_obs = tree_map(lambda x: x.unsqueeze(1), agent_obs)
 
+            # print("Initial Hidden State:")
+            # for i in range(len(hidden_state)):
+            #     # print(hidden_state[i][0].shape)
+            #     print(hidden_state[i][1][0].shape)
+            #     print(hidden_state[i][1][1].shape)
             # Need to run this with no_grad or else the gradient descent will crash during training lol
-            pi_hs, v_hs, pi_dists, v_preds, next_hidden_states = run_base_vec_envs(agent_obss, hidden_states, self.agent, device)
+            with th.no_grad():
+                (pi_h, v_h), next_hidden_state = self.agent.policy.net(
+                    agent_obs, hidden_state, context={"first": dummy_first})
 
-            # Get action sampled from policy distribution
-            # If deterministic==True, this just uses argmax
-            actions = [self.agent.policy.pi_head.sample(pi_distribution, deterministic=False) for pi_distribution in pi_dists]
+                pi_distribution = self.agent.policy.pi_head(pi_h)
+                v_prediction = self.agent.policy.value_head(v_h)
 
-            # Get log probability of taking this action given pi (vectorized)
-            action_log_probs = [self.agent.policy.get_logprob_of_action(
-                pi_distribution, action) for pi_distribution, action in zip(pi_dists, actions)]
+            action = self.agent.policy.pi_head.sample(
+                pi_distribution, deterministic=False)
+
+            # Get log probability of taking this action given pi
+            action_log_prob = self.agent.policy.get_logprob_of_action(
+                pi_distribution, action)
 
             # Process this so the env can accept it
-            minerl_actions = [self.agent._agent_action_to_env(action) for action in actions]
+            minerl_action = self.agent._agent_action_to_env(action)
 
             # Take action step in the environment
-            obss, rewards, dones = step_vec_envs(minerl_actions)
+            next_obs, reward, next_done, info = env.step(minerl_action)
 
             # Immediately disregard the reward function from the environment
-            rewards = [self.rc.get_rewards(obs, True) for obs in obss]
+            reward = self.rc.get_rewards(obs, True)
+            episode_reward += reward
 
             # Important! When we store a memory, we want the hidden state at the time of the observation as input! Not the step after
-            memories = generate_vec_memories(agent_obss, hidden_states, pi_hs, v_hs, actions, action_log_probs,
-                            rewards, 0, dones, v_preds)
+            memory = Memory(agent_obs, hidden_state, pi_h, v_h, action, action_log_prob,
+                            reward, 0, done, v_prediction)
 
             # Now, update the state to the new state
-            hidden_states = [next_hidden_state for next_hidden_state in next_hidden_states]
+            hidden_state = next_hidden_state
 
-            # TODO should not just extend, need to keep env structure to
-            # calculage GAE
-            rollout_memories.extend(memories)
+            rollout_memories.append(memory)
 
-            # Finally, render the environments to the screen
+            # Finally, render the environment to the screen
             # Comment this out if you are boring
-            [env.render() for env in self.envs]
+            env.render()
+
+
 
         # Reset the reward calculator once we are done with the episode
         self.rc.clear()
@@ -239,6 +272,7 @@ class ProximalPolicyOptimizer:
             gae = delta + self.gamma * self.lam * masks[i] * gae
             returns.insert(0, gae + v_preds[i])
 
+
         # Make changes to the memories for this episode before adding them to main buffer
         for i in range(len(rollout_memories)):
             # Replace raw reward with the GAE
@@ -265,6 +299,8 @@ class ProximalPolicyOptimizer:
         end = datetime.now()
         print(
             f"✅ Episode finished (duration - {end - start} | memories - {len(rollout_memories)} | total reward - {episode_reward})")
+        
+        return next_obs, next_done, next_hidden_state
 
     def learn(self):
 
@@ -469,11 +505,28 @@ class ProximalPolicyOptimizer:
         if self.plot:
             self.init_plot()
 
+        obss = [None]*self.num_envs
+        dones = [False]*self.num_envs
+        states = [None]*self.num_envs
+
         for i in range(self.num_rollouts):
 
             print(f"🎬 Starting {self.env_name} rollout {i + 1}/{self.num_rollouts}")
-            self.rollout() # hard reset?
-            self.learn()
+
+            obss_buffer = []
+            dones_buffer = []
+            states_buffer = []
+            for env, next_obs, next_done, next_hidden_state in zip(self.envs, obss, dones, states):
+                next_obs, next_done, next_hidden_state = self.rollout(env, next_obs, next_done, next_hidden_state)
+                obss_buffer.append(next_obs)
+                dones_buffer.append(next_done)
+                states_buffer.append(next_hidden_state)
+            
+            obss = obss_buffer
+            dones = dones_buffer
+            states = states_buffer
+
+            self.learn(obss, dones)
 
             # clear memories after every rollout
             self.memories.clear()
