@@ -14,6 +14,7 @@ from tqdm import tqdm
 from rewards import RewardsCalculator
 from memory import Memory, MemoryDataset
 from util import to_torch_tensor, normalize, safe_reset, hard_reset, calculate_gae
+from vectorized_minerl import *
 
 sys.path.insert(0, "vpt")  # nopep8
 
@@ -39,8 +40,8 @@ class ProximalPolicyOptimizer:
             rc: RewardsCalculator,
 
             # Hyperparameters
-            ppo_iterations: int,
-            episodes: int,
+            num_rollouts: int, 
+            num_steps: int, # the number of steps per rollout, T 
             epochs: int,
             minibatch_size: int,
             lr: float,
@@ -58,19 +59,21 @@ class ProximalPolicyOptimizer:
 
             # Optional: plot stuff
             plot: bool,
+            num_envs: int,
 
 
 
     ):
         self.env_name = env_name
-        self.env = gym.make(env_name)
+        self.num_envs = num_envs
+        self.envs = init_vec_envs(self.env_name, self.num_envs)
 
         # Load the reward calculator
         self.rc = rc
 
         # Load hyperparameters unchanged
-        self.ppo_iterations = ppo_iterations
-        self.episodes = episodes
+        self.num_rollouts = num_rollouts
+        self.num_steps = num_steps
         self.epochs = epochs
         self.minibatch_size = minibatch_size
         self.lr = lr
@@ -112,7 +115,7 @@ class ProximalPolicyOptimizer:
         pi_head_kwargs = agent_parameters["model"]["args"]["pi_head_opts"]
         pi_head_kwargs["temperature"] = float(pi_head_kwargs["temperature"])
 
-        self.agent = MineRLAgent(self.env, policy_kwargs=policy_kwargs,
+        self.agent = MineRLAgent(self.envs, policy_kwargs=policy_kwargs,
                                  pi_head_kwargs=pi_head_kwargs)
         self.agent.load_weights(weights_path)
 
@@ -138,40 +141,46 @@ class ProximalPolicyOptimizer:
         # Potential memory issues / optimizations around here...
         self.memories: List[Memory] = []
 
-    def run_episode(self, hard_reset: bool = False):
+    def rollout(self, env, next_obs=None, next_done=False, next_hidden_state=None, hard_reset: bool = False):
         """
-        Runs a single episode and records the memories 
+        Runs a rollout on the vectorized environments for `num_steps` timesteps and records the memories
+
+        Returns `next_obs` and `next_done` for starting the next section of rollouts
         """
         start = datetime.now()
 
         # Temporary buffer to put the memories in before extending self.memories
-        episode_memories: List[Memory] = []
+        rollout_memories: List[Memory] = []
 
-        # Initialize the hidden state vector
-        # Note that batch size is 1 here because we are only running the agent
-        # on a single episode
-        hidden_state = self.agent.policy.initial_state(1)
+        # Only run this in the beginning
+        if next_obs is None:
+            # Initialize the hidden state vector
+            next_hidden_state = self.agent.policy.initial_state(1)
 
-        # Need to do a little bit of augmentation so the dataloader accepts the initial hidden state
-        # This shouldn't affect anything; initial_state just uses None instead of empty tensors
-        for i in range(len(hidden_state)):
-            hidden_state[i] = list(hidden_state[i])
-            hidden_state[i][0] = th.from_numpy(np.full(
-                (1, 1, 128), False)).to(device)
+            ## MineRL specific technical setup
+
+            # Need to do a little bit of augmentation so the dataloader accepts the initial hidden state
+            # This shouldn't affect anything; initial_state just uses None instead of empty tensors
+            for i in range(len(next_hidden_state)):
+                next_hidden_state[i] = list(next_hidden_state[i])
+                next_hidden_state[i][0] = th.from_numpy(np.full(
+                    (1, 1, 128), False)).to(device)
+
+
+            if hard_reset:
+                env.close()
+                env = gym.make(self.env_name)
+                next_obs = env.reset()
+            else:
+                next_obs = env.reset()
+            
+            next_done = False
+
+
 
         # This is a dummy tensor of shape (batchsize, 1) which was used as a mask internally
         dummy_first = th.from_numpy(np.array((False,))).to(device)
         dummy_first = dummy_first.unsqueeze(1)
-
-        # Start the episode with gym
-        # obs = self.env.reset()
-        if hard_reset:
-            self.env.close()
-            self.env = gym.make(self.env_name)
-            obs = self.env.reset()
-        else:
-            obs = self.env.reset()
-        done = False
 
         # This is not really used in training
         # More just for us to estimate the success of an episode
@@ -182,7 +191,21 @@ class ProximalPolicyOptimizer:
             self.live_value_history.clear()
             self.live_gae_history.clear()
 
-        while not done:
+        for _ in range(self.num_steps):
+            obs = next_obs
+            done = next_done
+            hidden_state = next_hidden_state
+
+            # We have to do some resetting...
+            if done:
+                next_obs = env.reset()
+                hidden_state = self.agent.policy.initial_state(1)
+                for i in range(len(hidden_state)):
+                    hidden_state[i] = list(hidden_state[i])
+                    hidden_state[i][0] = th.from_numpy(np.full(
+                        (1, 1, 128), False)).to(device)
+
+
             # Preprocess image
             agent_obs = self.agent._env_obs_to_agent(obs)
 
@@ -202,17 +225,8 @@ class ProximalPolicyOptimizer:
                 pi_distribution = self.agent.policy.pi_head(pi_h)
                 v_prediction = self.agent.policy.value_head(v_h)
 
-            # print("Next Hidden State:")
-            # for i in range(len(next_hidden_state)):
-            #     print(next_hidden_state[i][0].shape)
-            #     print(next_hidden_state[i][1][0].shape)
-            #     print(next_hidden_state[i][1][1].shape)
-            # Get action sampled from policy distribution
-            # If deterministic==True, this just uses argmax
             action = self.agent.policy.pi_head.sample(
                 pi_distribution, deterministic=False)
-
-            # print(action)
 
             # Get log probability of taking this action given pi
             action_log_prob = self.agent.policy.get_logprob_of_action(
@@ -222,7 +236,7 @@ class ProximalPolicyOptimizer:
             minerl_action = self.agent._agent_action_to_env(action)
 
             # Take action step in the environment
-            obs, reward, done, info = self.env.step(minerl_action)
+            next_obs, reward, next_done, info = env.step(minerl_action)
 
             # Immediately disregard the reward function from the environment
             reward = self.rc.get_rewards(obs)
@@ -233,22 +247,20 @@ class ProximalPolicyOptimizer:
             memory = Memory(agent_obs, hidden_state, pi_h, v_h, action, action_log_prob,
                             reward, 0, done, v_prediction)
 
-            # Now, update the state to the new state
-            hidden_state = next_hidden_state
+            rollout_memories.append(memory)
 
-            # print("Memory Hidden State: ", memory.hidden_state)
-
-            episode_memories.append(memory)
             # Finally, render the environment to the screen
             # Comment this out if you are boring
-            self.env.render()
+            env.render()
+
+
 
             if self.plot:
                 # Calculate the GAE up to this point
-                v_preds = list(map(lambda mem: mem.value, episode_memories))
-                rewards = list(map(lambda mem: mem.reward, episode_memories))
+                v_preds = list(map(lambda mem: mem.value, rollout_memories))
+                rewards = list(map(lambda mem: mem.reward, rollout_memories))
                 masks = list(
-                    map(lambda mem: 1 - float(mem.done), episode_memories))
+                    map(lambda mem: 1 - float(mem.done), rollout_memories))
 
                 returns = calculate_gae(
                     rewards, v_preds, masks, self.gamma, self.lam)
@@ -284,32 +296,38 @@ class ProximalPolicyOptimizer:
         # Calculate the generalized advantage estimate
         # This used to be done during each minibatch; however, the GAE should be more accurate
         # if we calculate it over the entire episode... I think?
-        v_preds = list(map(lambda mem: mem.value, episode_memories))
-        rewards = list(map(lambda mem: mem.reward, episode_memories))
-        masks = list(map(lambda mem: 1 - float(mem.done), episode_memories))
+
+        # It is not "more accurate," it MUST be calculated with rollouts after it, so in 
+        # randomized minibatch would just be nonsense...
+        
+        # TODO need to use next_obs and next_done for this
+        v_preds = list(map(lambda mem: mem.value, rollout_memories))
+        rewards = list(map(lambda mem: mem.reward, rollout_memories))
+        masks = list(map(lambda mem: 1 - float(mem.done), rollout_memories))
 
         returns = calculate_gae(rewards, v_preds, masks, self.gamma, self.lam)
 
-        # for i in reversed(range(len(episode_memories))):
+        # for i in reversed(range(len(rollout_memories))):
 
-        #     # hacky but necessary since we don't have "next_state"
-        #     v_next = v_preds[i + 1] if i != len(episode_memories) - 1 else 0
+            # hacky but necessary since we don't have "next_state"
+            v_next = v_preds[i + 1] if i != len(rollout_memories) - 1 else 0 # TODO insert next_obs here?
 
         #     delta = rewards[i] + self.gamma * \
         #         v_next * masks[i] - v_preds[i]
         #     gae = delta + self.gamma * self.lam * masks[i] * gae
         #     returns.insert(0, gae + v_preds[i])
 
+
         # Make changes to the memories for this episode before adding them to main buffer
-        for i in range(len(episode_memories)):
+        for i in range(len(rollout_memories)):
             # Replace raw reward with the GAE
-            episode_memories[i].reward = returns[i]
+            rollout_memories[i].reward = returns[i]
 
             # Remember the total reward for this episode
-            episode_memories[i].total_reward = episode_reward
+            rollout_memories[i].total_reward = episode_reward
 
         # Update internal memory buffer
-        self.memories.extend(episode_memories)
+        self.memories.extend(rollout_memories)
 
         if self.plot:
             # Update the reward plot
@@ -325,12 +343,16 @@ class ProximalPolicyOptimizer:
 
         end = datetime.now()
         print(
-            f"✅ Episode finished (duration - {end - start} | memories - {len(episode_memories)} | total reward - {episode_reward})")
+            f"✅ Rollout finished (duration - {end - start} | memories - {len(rollout_memories)} | total reward - {episode_reward})")
+        
+        return next_obs, next_done, next_hidden_state
 
     def learn(self):
 
         # Create dataloader from the memory buffer
         data = MemoryDataset(self.memories)
+
+        # TODO should not be shuffling, rather rolling out again
         dl = DataLoader(data, batch_size=self.minibatch_size, shuffle=True)
 
         # Shorthand
@@ -398,9 +420,11 @@ class ProximalPolicyOptimizer:
                 policy_loss = - th.min(surr1, surr2) - self.beta_s * entropy
 
                 # Calculate clipped value loss
+                # TODO we do not need to clip this - might even be worse than not
                 value_clipped = (v_old +
                                  (v_prediction - v_old).clamp(-self.value_clip, self.value_clip)).to(device)
 
+                # TODO what is this?
                 value_loss_1 = (value_clipped.squeeze() - returns) ** 2
                 value_loss_2 = (v_prediction.squeeze() - returns) ** 2
 
@@ -539,38 +563,56 @@ class ProximalPolicyOptimizer:
 
             self.live_ax.legend(loc="upper right")
 
-        for i in range(self.ppo_iterations):
-            for eps in range(self.episodes):
-                print(
-                    f"🎬 Starting {self.env_name} episode {eps + 1}/{self.episodes}")
-                self.run_episode(hard_reset=eps == 0)
+    def run_train_loop(self):
+        """
+        Runs the basic PPO training loop
+        """
+        if self.plot:
+            self.init_plot()
 
-            # Trim the size of memory buffer:
-            if len(self.memories) > self.mem_buffer_size:
-                # self.memories.sort(key=lambda mem: mem.total_reward)
-                self.memories = self.memories[-self.mem_buffer_size:]
-                print(
-                    f"⚠️ Trimmed memory buffer to length {self.mem_buffer_size} (worst - {self.memories[0].total_reward} | best - {self.memories[-1].total_reward})")
+        obss = [None]*self.num_envs
+        dones = [False]*self.num_envs
+        states = [None]*self.num_envs
+
+        for i in range(self.num_rollouts):
+
+            print(f"🎬 Starting {self.env_name} rollout {i + 1}/{self.num_rollouts}")
+
+            obss_buffer = []
+            dones_buffer = []
+            states_buffer = []
+            for env, next_obs, next_done, next_hidden_state in zip(self.envs, obss, dones, states):
+                next_obs, next_done, next_hidden_state = self.rollout(env, next_obs, next_done, next_hidden_state)
+                obss_buffer.append(next_obs)
+                dones_buffer.append(next_done)
+                states_buffer.append(next_hidden_state)
+            
+            obss = obss_buffer
+            dones = dones_buffer
+            states = states_buffer
 
             self.learn()
-            # self.memories.clear()
+
+            # clear memories after every rollout
+            self.memories.clear()
 
 
 if __name__ == "__main__":
     rc = RewardsCalculator(
         damage_dealt=1,
+        mob_kills=10000
     )
-    # rc.set_time_punishment(-0.5)
+    rc.set_time_punishment(-10)
     ppo = ProximalPolicyOptimizer(
         "MineRLPunchCowEz-v0",
         "models/foundation-model-1x.model",
         "weights/foundation-model-1x.weights",
-
+        num_envs=3,
         rc=rc,
-        ppo_iterations=100,
-        episodes=5,
-        epochs=6,
-        minibatch_size=48,
+        num_rollouts=100,
+        num_steps=100,
+        epochs=4,
+        minibatch_size=20,
         lr=0.0001,
         weight_decay=0,
         betas=(0.9, 0.999),
