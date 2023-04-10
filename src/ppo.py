@@ -261,15 +261,15 @@ class ProximalPolicyOptimizer:
                 # Update the plots
                 self.live_reward_plot.set_ydata(self.live_reward_history)
                 self.live_reward_plot.set_xdata(
-                    np.arange(len(self.live_reward_history)))
+                    range(len(self.live_reward_history)))
 
                 self.live_value_plot.set_ydata(self.live_value_history)
                 self.live_value_plot.set_xdata(
-                    np.arange(len(self.live_value_history)))
+                    range(len(self.live_value_history)))
 
                 self.live_gae_plot.set_ydata(self.live_gae_history)
                 self.live_gae_plot.set_xdata(
-                    np.arange(len(self.live_gae_history)))
+                    range(len(self.live_gae_history)))
 
                 self.live_ax.relim()
                 self.live_ax.autoscale_view(True, True, True)
@@ -370,7 +370,7 @@ class ProximalPolicyOptimizer:
                 # Overwrite the rewards now
                 # This line makes no sense because it is a holdover from when GAE was still calculated here
                 # NORMALIZE THE GAE PER MINIBATCH
-                returns = (rewards - th.mean(rewards)) / th.std(rewards)
+                returns = normalize(rewards)
                 # returns = th.tensor(rewards).float().to(device)
 
                 # Calculate the explained variance, to see how accurate the GAE really is...
@@ -560,7 +560,7 @@ if __name__ == "__main__":
     rc = RewardsCalculator(
         damage_dealt=1,
     )
-    rc.set_time_punishment(-0.5)
+    # rc.set_time_punishment(-0.5)
     ppo = ProximalPolicyOptimizer(
         "MineRLPunchCowEz-v0",
         "models/foundation-model-1x.model",
@@ -569,15 +569,15 @@ if __name__ == "__main__":
         rc=rc,
         ppo_iterations=100,
         episodes=5,
-        epochs=4,
-        minibatch_size=20,
-        lr=0.000025,
+        epochs=6,
+        minibatch_size=48,
+        lr=0.0001,
         weight_decay=0,
         betas=(0.9, 0.999),
         beta_s=0.999,
-        eps_clip=0.1,
-        value_clip=0.1,
-        value_loss_weight=1.,
+        eps_clip=0.2,
+        value_clip=0.2,
+        value_loss_weight=10.,
         gamma=0.99,
         lam=0.95,
         mem_buffer_size=10000,
