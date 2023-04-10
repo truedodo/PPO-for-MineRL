@@ -35,3 +35,20 @@ def hard_reset(env):
     env = gym.make(env.unwrapped.spec.id)
     obs = env.reset()
     return obs, env
+
+
+def calculate_gae(rewards: list, values: list, masks: list, gamma: float, lam: float):
+    """
+    Calculate the generalized advantage estimate
+    """
+    gae = 0
+    returns = []
+
+    for step in reversed(range(len(rewards))):
+        next_value = values[step + 1] if step < len(rewards) - 1 else 0
+        delta = rewards[step] + gamma * \
+            next_value * masks[step] - values[step]
+        gae = delta + gamma * lam * masks[step] * gae
+        returns.insert(0, gae + values[step])
+
+    return returns

@@ -11,13 +11,12 @@ class Memory:
     This class represents a single frame/step of the agent
     A full episode should be of type List[Memory]
     """
-    # obs: np.ndarray
-    # state: np.ndarray
-    # obs: th.Tensor
+
+    # Raw pixel observation for this frame
     agent_obs: dict
-    state: np.ndarray
-    pi_h: np.ndarray
-    v_h: np.ndarray
+    hidden_state: list
+    pi_h: th.tensor
+    v_h: th.tensor
     action: np.ndarray
     action_log_prob: np.ndarray
     reward: float
@@ -42,7 +41,7 @@ class MemoryDataset(Dataset):
         mem = self.memories[idx]
 
         # This needs to be returned as a tuple
-        return mem.agent_obs, mem.state, mem.pi_h, mem.v_h, mem.action, mem.action_log_prob, mem.reward, mem.total_reward, mem.done, mem.value
+        return mem.agent_obs, mem.hidden_state, mem.pi_h, mem.v_h, mem.action, mem.action_log_prob, mem.reward, mem.total_reward, mem.done, mem.value
 
 
 # This is probably not needed, but might as well define this type so we have it
