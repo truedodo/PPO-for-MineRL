@@ -40,8 +40,8 @@ class ProximalPolicyOptimizer:
             rc: RewardsCalculator,
 
             # Hyperparameters
-            num_rollouts: int, 
-            num_steps: int, # the number of steps per rollout, T 
+            num_rollouts: int,
+            num_steps: int,  # the number of steps per rollout, T
             epochs: int,
             minibatch_size: int,
             lr: float,
@@ -157,7 +157,7 @@ class ProximalPolicyOptimizer:
             # Initialize the hidden state vector
             next_hidden_state = self.agent.policy.initial_state(1)
 
-            ## MineRL specific technical setup
+            # MineRL specific technical setup
 
             # Need to do a little bit of augmentation so the dataloader accepts the initial hidden state
             # This shouldn't affect anything; initial_state just uses None instead of empty tensors
@@ -166,17 +166,14 @@ class ProximalPolicyOptimizer:
                 next_hidden_state[i][0] = th.from_numpy(np.full(
                     (1, 1, 128), False)).to(device)
 
-
             if hard_reset:
                 env.close()
                 env = gym.make(self.env_name)
                 next_obs = env.reset()
             else:
                 next_obs = env.reset()
-            
+
             next_done = False
-
-
 
         # This is a dummy tensor of shape (batchsize, 1) which was used as a mask internally
         dummy_first = th.from_numpy(np.array((False,))).to(device)
@@ -204,7 +201,6 @@ class ProximalPolicyOptimizer:
                     hidden_state[i] = list(hidden_state[i])
                     hidden_state[i][0] = th.from_numpy(np.full(
                         (1, 1, 128), False)).to(device)
-
 
             # Preprocess image
             agent_obs = self.agent._env_obs_to_agent(obs)
@@ -253,8 +249,6 @@ class ProximalPolicyOptimizer:
             # Comment this out if you are boring
             env.render()
 
-
-
             if self.plot:
                 # Calculate the GAE up to this point
                 v_preds = list(map(lambda mem: mem.value, rollout_memories))
@@ -297,9 +291,9 @@ class ProximalPolicyOptimizer:
         # This used to be done during each minibatch; however, the GAE should be more accurate
         # if we calculate it over the entire episode... I think?
 
-        # It is not "more accurate," it MUST be calculated with rollouts after it, so in 
+        # It is not "more accurate," it MUST be calculated with rollouts after it, so in
         # randomized minibatch would just be nonsense...
-        
+
         # TODO need to use next_obs and next_done for this
         v_preds = list(map(lambda mem: mem.value, rollout_memories))
         rewards = list(map(lambda mem: mem.reward, rollout_memories))
@@ -309,14 +303,13 @@ class ProximalPolicyOptimizer:
 
         # for i in reversed(range(len(rollout_memories))):
 
-            # hacky but necessary since we don't have "next_state"
-            v_next = v_preds[i + 1] if i != len(rollout_memories) - 1 else 0 # TODO insert next_obs here?
+        # hacky but necessary since we don't have "next_state"
+        # v_next = v_preds[i + 1] if i != len(rollout_memories) - 1 else 0 # TODO insert next_obs here?
 
         #     delta = rewards[i] + self.gamma * \
         #         v_next * masks[i] - v_preds[i]
         #     gae = delta + self.gamma * self.lam * masks[i] * gae
         #     returns.insert(0, gae + v_preds[i])
-
 
         # Make changes to the memories for this episode before adding them to main buffer
         for i in range(len(rollout_memories)):
@@ -344,7 +337,7 @@ class ProximalPolicyOptimizer:
         end = datetime.now()
         print(
             f"✅ Rollout finished (duration - {end - start} | memories - {len(rollout_memories)} | total reward - {episode_reward})")
-        
+
         return next_obs, next_done, next_hidden_state
 
     def learn(self):
@@ -576,17 +569,19 @@ class ProximalPolicyOptimizer:
 
         for i in range(self.num_rollouts):
 
-            print(f"🎬 Starting {self.env_name} rollout {i + 1}/{self.num_rollouts}")
+            print(
+                f"🎬 Starting {self.env_name} rollout {i + 1}/{self.num_rollouts}")
 
             obss_buffer = []
             dones_buffer = []
             states_buffer = []
             for env, next_obs, next_done, next_hidden_state in zip(self.envs, obss, dones, states):
-                next_obs, next_done, next_hidden_state = self.rollout(env, next_obs, next_done, next_hidden_state)
+                next_obs, next_done, next_hidden_state = self.rollout(
+                    env, next_obs, next_done, next_hidden_state)
                 obss_buffer.append(next_obs)
                 dones_buffer.append(next_done)
                 states_buffer.append(next_hidden_state)
-            
+
             obss = obss_buffer
             dones = dones_buffer
             states = states_buffer
