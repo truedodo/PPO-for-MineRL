@@ -36,6 +36,9 @@ class ProximalPolicyOptimizer:
             model_path: str,
             weights_path: str,
 
+            out_weights_path: str,
+            save_every: int,
+
             # A custom reward function to be used
             rc: RewardsCalculator,
 
@@ -67,6 +70,9 @@ class ProximalPolicyOptimizer:
         self.env_name = env_name
         self.num_envs = num_envs
         self.envs = init_vec_envs(self.env_name, self.num_envs)
+
+        self.out_weights_path = out_weights_path
+        self.save_every = save_every
 
         # Load the reward calculator
         self.rc = rc
@@ -140,6 +146,75 @@ class ProximalPolicyOptimizer:
         # This will be a relatively large chunk of data
         # Potential memory issues / optimizations around here...
         self.memories: List[Memory] = []
+
+    def init_plots(self):
+        plt.ion()
+        self.main_fig, self.main_ax = plt.subplots(2, 3, figsize=(12, 8))
+        self.live_fig, self.live_ax = plt.subplots(1, 1, figsize=(6, 4))
+
+        # Set up policy loss plot
+        self.main_ax[0, 0].set_autoscale_on(True)
+        self.main_ax[0, 0].autoscale_view(True, True, True)
+
+        self.main_ax[0, 0].set_title("Policy Loss")
+
+        self.pi_loss_plot, = self.main_ax[0, 0].plot(
+            [], [], color="blue")
+
+        # Setup value loss plot
+        self.main_ax[0, 1].set_autoscale_on(True)
+        self.main_ax[0, 1].autoscale_view(True, True, True)
+
+        self.main_ax[0, 1].set_title("Value Loss")
+
+        self.v_loss_plot, = self.main_ax[0, 1].plot(
+            [], [], color="orange")
+
+        # Set up total loss plot
+        self.main_ax[0, 2].set_autoscale_on(True)
+        self.main_ax[0, 2].autoscale_view(True, True, True)
+
+        self.main_ax[0, 2].set_title("Total Loss")
+
+        self.total_loss_plot, = self.main_ax[0, 2].plot(
+            [], [], color="purple"
+        )
+
+        # Setup entropy plot
+        self.main_ax[1, 0].set_autoscale_on(True)
+        self.main_ax[1, 0].autoscale_view(True, True, True)
+        self.main_ax[1, 0].set_title("Entropy")
+
+        self.entropy_plot, = self.main_ax[1, 0].plot([], [], color="green")
+
+        # Setup explained variance plot
+        self.main_ax[1, 1].set_autoscale_on(True)
+        self.main_ax[1, 1].autoscale_view(True, True, True)
+        self.main_ax[1, 1].set_title("Explained Vaiance")
+
+        self.expl_var_plot, = self.main_ax[1, 1].plot([], [], color="grey")
+
+        # Setup reward plot
+        self.main_ax[1, 2].set_autoscale_on(True)
+        self.main_ax[1, 2].autoscale_view(True, True, True)
+        self.main_ax[1, 2].set_title("Reward per Episode")
+
+        self.reward_plot,  = self.main_ax[1, 2].plot([], [], color="red")
+
+        # Setup live plots
+        self.live_ax.set_autoscale_on(True)
+        self.live_ax.autoscale_view(True, True, True)
+        self.live_ax.set_title("Episode Progress")
+        self.live_ax.set_xlabel("steps")
+
+        self.live_reward_plot, = self.live_ax.plot(
+            [], [], color="red", label="Reward")
+        self.live_value_plot, = self.live_ax.plot(
+            [], [], color="blue", label="Value")
+        self.live_gae_plot, = self.live_ax.plot(
+            [], [], color="green", label="GAE")
+
+        self.live_ax.legend(loc="upper right")
 
     def rollout(self, env, next_obs=None, next_done=False, next_hidden_state=None, hard_reset: bool = False):
         """
@@ -487,87 +562,18 @@ class ProximalPolicyOptimizer:
         Runs the basic PPO training loop
         """
         if self.plot:
-            # Create a plot to show the progress of the training
-            plt.ion()
-            self.main_fig, self.main_ax = plt.subplots(2, 3, figsize=(12, 8))
-            self.live_fig, self.live_ax = plt.subplots(1, 1, figsize=(6, 4))
-
-            # Set up policy loss plot
-            self.main_ax[0, 0].set_autoscale_on(True)
-            self.main_ax[0, 0].autoscale_view(True, True, True)
-
-            self.main_ax[0, 0].set_title("Policy Loss")
-
-            self.pi_loss_plot, = self.main_ax[0, 0].plot(
-                [], [], color="blue")
-
-            # Setup value loss plot
-            self.main_ax[0, 1].set_autoscale_on(True)
-            self.main_ax[0, 1].autoscale_view(True, True, True)
-
-            self.main_ax[0, 1].set_title("Value Loss")
-
-            self.v_loss_plot, = self.main_ax[0, 1].plot(
-                [], [], color="orange")
-
-            # Set up total loss plot
-            self.main_ax[0, 2].set_autoscale_on(True)
-            self.main_ax[0, 2].autoscale_view(True, True, True)
-
-            self.main_ax[0, 2].set_title("Total Loss")
-
-            self.total_loss_plot, = self.main_ax[0, 2].plot(
-                [], [], color="purple"
-            )
-
-            # Setup entropy plot
-            self.main_ax[1, 0].set_autoscale_on(True)
-            self.main_ax[1, 0].autoscale_view(True, True, True)
-            self.main_ax[1, 0].set_title("Entropy")
-
-            self.entropy_plot, = self.main_ax[1, 0].plot([], [], color="green")
-
-            # Setup explained variance plot
-            self.main_ax[1, 1].set_autoscale_on(True)
-            self.main_ax[1, 1].autoscale_view(True, True, True)
-            self.main_ax[1, 1].set_title("Explained Variance")
-
-            self.expl_var_plot, = self.main_ax[1, 1].plot([], [], color="grey")
-
-            # Setup reward plot
-            self.main_ax[1, 2].set_autoscale_on(True)
-            self.main_ax[1, 2].autoscale_view(True, True, True)
-            self.main_ax[1, 2].set_title("Reward per Episode")
-
-            self.reward_plot,  = self.main_ax[1, 2].plot([], [], color="red")
-
-            # Setup live plots
-            self.live_ax.set_autoscale_on(True)
-            self.live_ax.autoscale_view(True, True, True)
-            self.live_ax.set_title("Episode Progress")
-            self.live_ax.set_xlabel("steps")
-
-            self.live_reward_plot, = self.live_ax.plot(
-                [], [], color="red", label="Reward")
-            self.live_value_plot, = self.live_ax.plot(
-                [], [], color="blue", label="Value")
-            self.live_gae_plot, = self.live_ax.plot(
-                [], [], color="green", label="GAE")
-
-            self.live_ax.legend(loc="upper right")
-
-    def run_train_loop(self):
-        """
-        Runs the basic PPO training loop
-        """
-        if self.plot:
-            self.init_plot()
+            self.init_plots()
 
         obss = [None]*self.num_envs
         dones = [False]*self.num_envs
         states = [None]*self.num_envs
 
         for i in range(self.num_rollouts):
+
+            if i % self.save_every == 0:
+                print(f"💾 Saving weights to {self.out_weights_path}")
+                state_dict = self.agent.policy.state_dict()
+                th.save(state_dict, self.out_weights_path)
 
             print(
                 f"🎬 Starting {self.env_name} rollout {i + 1}/{self.num_rollouts}")
@@ -595,13 +601,15 @@ class ProximalPolicyOptimizer:
 if __name__ == "__main__":
     rc = RewardsCalculator(
         damage_dealt=1,
-        mob_kills=10000
+        mob_kills=100
     )
-    rc.set_time_punishment(-10)
+    rc.set_time_punishment(-1)
     ppo = ProximalPolicyOptimizer(
-        "MineRLPunchCowEz-v0",
-        "models/foundation-model-1x.model",
-        "weights/foundation-model-1x.weights",
+        env_name="MineRLPunchCowEz-v0",
+        model_path="models/foundation-model-1x.model",
+        weights_path="weights/foundation-model-1x.weights",
+        out_weights_path="weights/cow-deleter-1x.weights",
+        save_every=5,
         num_envs=3,
         rc=rc,
         num_rollouts=100,
