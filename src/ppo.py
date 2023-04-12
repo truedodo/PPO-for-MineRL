@@ -1,12 +1,14 @@
 
 import pickle
 import sys
+import time
 from typing import List
 import gym
 import torch as th
 from torch.utils.data import DataLoader
 import matplotlib.pyplot as plt
 import numpy as np
+import pandas as pd
 import copy
 
 from datetime import datetime
@@ -25,17 +27,16 @@ from lib.tree_util import tree_map  # nopep8
 device = th.device("cuda:0" if th.cuda.is_available() else "cpu")
 # device = th.device("mps")  # apple silicon
 
-TRAIN_WHOLE_MODEL = True
+TRAIN_WHOLE_MODEL = False
 
 
 class ProximalPolicyOptimizer:
     def __init__(
             self,
             env_name: str,
-            model_path: str,
-            weights_path: str,
-
-            out_weights_path: str,
+            model: str,
+            weights: str,
+            out_weights: str,
             save_every: int,
 
 
@@ -64,15 +65,16 @@ class ProximalPolicyOptimizer:
 
 
     ):
+        model_path = f"models/{model}.model"
+        weights_path = f"weights/{weights}.weights"
+        self.out_weights_path = f"weights/{out_weights}.weights"
+        self.training_name = f"ppo-{env_name}-{out_weights}-{int(time.time())}"
+
         self.env_name = env_name
         self.num_envs = num_envs
         self.envs = init_vec_envs(self.env_name, self.num_envs)
 
-        self.out_weights_path = out_weights_path
         self.save_every = save_every
-
-        # Load the reward calculator
-        self.rc = rc
 
         # Load hyperparameters unchanged
         self.num_rollouts = num_rollouts
@@ -132,6 +134,9 @@ class ProximalPolicyOptimizer:
 
         self.optim = th.optim.Adam(
             self.trainable_parameters, lr=lr, betas=betas, weight_decay=weight_decay)
+
+        self.scheduler = th.optim.lr_scheduler.LambdaLR(
+            self.optim, lambda x: 1 - x / num_rollouts)
 
         # self.optim_pi = th.optim.Adam(
         #     self.agent.policy.pi_head.parameters(), lr=lr, betas=betas)
@@ -194,7 +199,7 @@ class ProximalPolicyOptimizer:
         # Setup reward plot
         self.main_ax[1, 2].set_autoscale_on(True)
         self.main_ax[1, 2].autoscale_view(True, True, True)
-        self.main_ax[1, 2].set_title("Reward per Episode")
+        self.main_ax[1, 2].set_title("Reward per Rollout Phase")
 
         self.reward_plot,  = self.main_ax[1, 2].plot([], [], color="red")
 
@@ -357,7 +362,6 @@ class ProximalPolicyOptimizer:
                 self.live_fig.canvas.flush_events()
 
         # Reset the reward calculator once we are done with the episode
-        self.rc.clear()
 
         # Calculate the generalized advantage estimate
         # This used to be done during each minibatch; however, the GAE should be more accurate
@@ -372,16 +376,6 @@ class ProximalPolicyOptimizer:
         masks = list(map(lambda mem: 1 - float(mem.done), rollout_memories))
 
         returns = calculate_gae(rewards, v_preds, masks, self.gamma, self.lam)
-
-        # for i in reversed(range(len(rollout_memories))):
-
-        # hacky but necessary since we don't have "next_state"
-        # v_next = v_preds[i + 1] if i != len(rollout_memories) - 1 else 0 # TODO insert next_obs here?
-
-        #     delta = rewards[i] + self.gamma * \
-        #         v_next * masks[i] - v_preds[i]
-        #     gae = delta + self.gamma * self.lam * masks[i] * gae
-        #     returns.insert(0, gae + v_preds[i])
 
         # Make changes to the memories for this episode before adding them to main buffer
         for i in range(len(rollout_memories)):
@@ -408,7 +402,7 @@ class ProximalPolicyOptimizer:
 
         end = datetime.now()
         print(
-            f"✅ Rollout finished (duration - {end - start} | memories - {len(rollout_memories)} | total reward - {episode_reward})")
+            f"✅ Rollout finished (duration: {end - start} | memories: {len(rollout_memories)} | total reward: {episode_reward})")
 
         return next_obs, next_done, next_hidden_state
 
@@ -554,6 +548,10 @@ class ProximalPolicyOptimizer:
                 self.main_fig.canvas.flush_events()
             # update_network(value_loss, self.optim_v)
 
+        # Update learning rate
+        self.scheduler.step()
+        print(f"New learning rate: {self.scheduler.get_last_lr()}")
+
     def run_train_loop(self):
         """
         Runs the basic PPO training loop
@@ -571,6 +569,22 @@ class ProximalPolicyOptimizer:
                 print(f"💾 Saving weights to {self.out_weights_path}")
                 state_dict = self.agent.policy.state_dict()
                 th.save(state_dict, self.out_weights_path)
+
+                data_path = f"data/{self.training_name}.csv"
+                print(f"💾 Saving training history to {data_path}")
+                df = pd.DataFrame(
+                    data={
+                        "pi_loss": self.pi_loss_history,
+                        "v_loss": self.v_loss_history,
+                        "total_loss": self.total_loss_history,
+                        "entropy": self.entropy_history,
+                        "expl_var": self.expl_var_history
+                    })
+                df.to_csv(data_path, index=False)
+
+                fig_path = f"data/{self.training_name}.png"
+                print(f"💾 Saving training plot to {fig_path}")
+                self.main_fig.savefig(fig_path)
 
             print(
                 f"🎬 Starting {self.env_name} rollout {i + 1}/{self.num_rollouts}")
@@ -599,22 +613,22 @@ if __name__ == "__main__":
 
     ppo = ProximalPolicyOptimizer(
         env_name="MineRLPunchCowEz-v0",
-        model_path="models/foundation-model-1x.model",
-        weights_path="weights/foundation-model-1x.weights",
-        out_weights_path="weights/cow-deleter-1x.weights",
+        model="foundation-model-1x",
+        weights="foundation-model-1x",
+        out_weights="cow-deleter-1x",
         save_every=5,
-        num_envs=3,
-        num_rollouts=200,
+        num_envs=4,
+        num_rollouts=500,
         num_steps=50,
-        epochs=4,
-        minibatch_size=20,
-        lr=0.0001,
+        epochs=8,
+        minibatch_size=48,
+        lr=2.5e-4,
         weight_decay=0,
         betas=(0.9, 0.999),
-        beta_s=0.999,
+        beta_s=0.05,
         eps_clip=0.2,
         value_clip=0.2,
-        value_loss_weight=0.2,
+        value_loss_weight=0.5,
         gamma=0.99,
         lam=0.95,
         mem_buffer_size=10000,
