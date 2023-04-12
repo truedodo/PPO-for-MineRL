@@ -5,6 +5,7 @@ from pprint import pprint
 import gym
 import minerl
 import pickle
+import pandas as pd
 
 import numpy as np
 from datetime import datetime
@@ -22,14 +23,20 @@ sys.path.insert(0, "vpt")  # nopep8
 from agent import MineRLAgent  # nopep8
 
 
-n_trials = 200
+n_trials = 200 if len(sys.argv) < 2 else int(sys.argv[1])
 rewards = []
+killed = []
+damage = []
 
+env_name = "MineRLPunchCow-v0"
 
-env = gym.make("MineRLPunchCow-v0")
-model = f"models/foundation-model-2x.model"
+env = gym.make(env_name)
 
-weights = f"weights/foundation-model-2x.weights"
+model_name = "foundation-model-2x"
+weights_name = "foundation-model-2x"
+
+model = f"models/{model_name}.model"
+weights = f"weights/{weights_name}.weights"
 
 agent_parameters = pickle.load(open(model, "rb"))
 # pprint(agent_parameters)
@@ -43,7 +50,8 @@ agent.load_weights(weights)
 
 
 rc = RewardsCalculator(
-    damage_dealt=1
+    damage_dealt=1,
+    mob_kills=200
 )
 
 plt.ion()
@@ -67,8 +75,13 @@ for k in range(n_trials):
         total_reward += reward
         env.render()
 
-    rc.clear()
+
     rewards.append(total_reward)
+    killed.append(rc.stats['mob_kills'][1] > 1)
+    damage.append(rc.stats['damage_dealt'][1])
+
+    rc.clear()
+
     print(
         f"🏁 Finished  with {total_reward} reward (time: {datetime.now() - start})\n")
     print(f"Current mean:   {np.mean(rewards)}")
@@ -87,5 +100,8 @@ for k in range(n_trials):
     plt.draw()
     fig.canvas.flush_events()
 
+# save the data
+df = pd.DataFrame(data={"damage" : damage, "killed": killed, "reward": rewards})
+df.to_csv(f"data/{env_name}&{model_name}&{weights_name}", index=False)
 
 env.close()
