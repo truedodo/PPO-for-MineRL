@@ -18,7 +18,7 @@ labels = []
 for env, model, weights, df in data:
     if env == "MineRLPunchCow-v0":
         labels.append(weights)
-        box_data.append(df['damage'].values[0])
-        
+        box_data.append(df['damage'].values)
+
 plt.boxplot(box_data, labels=labels)
 plt.show()
