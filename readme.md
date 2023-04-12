@@ -23,8 +23,12 @@ cd battle-craft-rl
 
 Download the `.model` and `.weight` files from the [VPT readme](https://github.com/jhsul/Video-Pre-Training) and put them in the `models/` and `weights/` directories, respectively.
 
-## Usage
+## Example Usage
 
 ```sh
-python src/train.py
+# Run a baseline test of the VPT model
+python src/baseline.py --env MineRLPunchCowEz-v0 --model foundation-model-1x --weights foundation-model-1x
+
+# Train with PPO
+python src/ppo.py
 ```
