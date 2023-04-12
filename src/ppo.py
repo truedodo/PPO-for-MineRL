@@ -11,7 +11,6 @@ import copy
 
 from datetime import datetime
 from tqdm import tqdm
-from rewards import RewardsCalculator
 from memory import Memory, MemoryDataset
 from util import to_torch_tensor, normalize, safe_reset, hard_reset, calculate_gae
 from vectorized_minerl import *
@@ -39,8 +38,6 @@ class ProximalPolicyOptimizer:
             out_weights_path: str,
             save_every: int,
 
-            # A custom reward function to be used
-            rc: RewardsCalculator,
 
             # Hyperparameters
             num_rollouts: int,
@@ -310,7 +307,7 @@ class ProximalPolicyOptimizer:
             next_obs, reward, next_done, info = env.step(minerl_action)
 
             # Immediately disregard the reward function from the environment
-            reward = self.rc.get_rewards(obs)
+            # reward = self.rc.get_rewards(obs)
             episode_reward += reward
 
             # Important! When we store a memory, we want the hidden state at the time of the observation as input! Not the step after
@@ -599,11 +596,7 @@ class ProximalPolicyOptimizer:
 
 
 if __name__ == "__main__":
-    rc = RewardsCalculator(
-        damage_dealt=1,
-        mob_kills=100
-    )
-    rc.set_time_punishment(-1)
+
     ppo = ProximalPolicyOptimizer(
         env_name="MineRLPunchCowEz-v0",
         model_path="models/foundation-model-1x.model",
@@ -611,7 +604,6 @@ if __name__ == "__main__":
         out_weights_path="weights/cow-deleter-1x.weights",
         save_every=5,
         num_envs=3,
-        rc=rc,
         num_rollouts=200,
         num_steps=50,
         epochs=4,

@@ -7,6 +7,8 @@ stat_names = [
     "mob_kills"
 ]
 
+# TODO:: DELETE THIS ENTIRE FILE
+
 
 class RewardsCalculator:
     def __init__(self, **kwargs):
