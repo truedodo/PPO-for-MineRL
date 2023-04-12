@@ -318,7 +318,7 @@ class ProximalPolicyOptimizer:
             # Important! When we store a memory, we want the hidden state at the time of the observation as input! Not the step after
             # This is because we need to fully recreate the input when training the LSTM part of the network
             memory = Memory(agent_obs, hidden_state, pi_h, v_h, action, action_log_prob,
-                            reward, 0, done, v_prediction)
+                            reward, 0, next_done, v_prediction)
 
             rollout_memories.append(memory)
 
@@ -417,7 +417,7 @@ class ProximalPolicyOptimizer:
         # Shorthand
         policy = self.agent.policy
 
-        for _ in tqdm(range(self.epochs), desc="epochs"):
+        for _ in tqdm(range(self.epochs), desc="🧠 Epochs"):
 
             # Note: These are batches, not individual samples
             for agent_obs, state, recorded_pi_h, recorded_v_h, actions, old_action_log_probs, rewards, total_rewards, dones, v_old in dl:
@@ -484,6 +484,7 @@ class ProximalPolicyOptimizer:
                                  (v_prediction - v_old).clamp(-self.value_clip, self.value_clip)).to(device)
 
                 # TODO what is this?
+
                 value_loss_1 = (value_clipped.squeeze() - returns) ** 2
                 value_loss_2 = (v_prediction.squeeze() - returns) ** 2
 
@@ -550,7 +551,7 @@ class ProximalPolicyOptimizer:
 
         # Update learning rate
         self.scheduler.step()
-        print(f"New learning rate: {self.scheduler.get_last_lr()}")
+        # print(f"New learning rate: {self.scheduler.get_last_lr()}")
 
     def run_train_loop(self):
         """
@@ -566,12 +567,10 @@ class ProximalPolicyOptimizer:
         for i in range(self.num_rollouts):
 
             if i % self.save_every == 0:
-                print(f"💾 Saving weights to {self.out_weights_path}")
                 state_dict = self.agent.policy.state_dict()
                 th.save(state_dict, self.out_weights_path)
 
                 data_path = f"data/{self.training_name}.csv"
-                print(f"💾 Saving training history to {data_path}")
                 df = pd.DataFrame(
                     data={
                         "pi_loss": self.pi_loss_history,
@@ -583,8 +582,11 @@ class ProximalPolicyOptimizer:
                 df.to_csv(data_path, index=False)
 
                 fig_path = f"data/{self.training_name}.png"
-                print(f"💾 Saving training plot to {fig_path}")
                 self.main_fig.savefig(fig_path)
+                print(f"💾 Saved checkpoint data")
+                print(f"   - {self.out_weights_path}")
+                print(f"   - {data_path}")
+                print(f"   - {fig_path}")
 
             print(
                 f"🎬 Starting {self.env_name} rollout {i + 1}/{self.num_rollouts}")
@@ -620,15 +622,15 @@ if __name__ == "__main__":
         num_envs=4,
         num_rollouts=500,
         num_steps=50,
-        epochs=8,
+        epochs=6,
         minibatch_size=48,
-        lr=2.5e-4,
+        lr=2.5e-5,
         weight_decay=0,
         betas=(0.9, 0.999),
-        beta_s=0.05,
+        beta_s=0.2,
         eps_clip=0.2,
         value_clip=0.2,
-        value_loss_weight=0.5,
+        value_loss_weight=0.2,
         gamma=0.99,
         lam=0.95,
         mem_buffer_size=10000,
