@@ -591,12 +591,17 @@ class ProximalPolicyOptimizer:
             print(
                 f"🎬 Starting {self.env_name} rollout {i + 1}/{self.num_rollouts}")
 
+            # Do a server restart every 10 rollouts
+            # Note: This is not one-to-one with the episodes
+            # At T = 100, this is every 5 episodes
+            should_hard_reset = i % 10 == 0 and i != 0
+
             obss_buffer = []
             dones_buffer = []
             states_buffer = []
             for env, next_obs, next_done, next_hidden_state in zip(self.envs, obss, dones, states):
                 next_obs, next_done, next_hidden_state = self.rollout(
-                    env, next_obs, next_done, next_hidden_state)
+                    env, next_obs, next_done, next_hidden_state, hard_reset=should_hard_reset)
                 obss_buffer.append(next_obs)
                 dones_buffer.append(next_done)
                 states_buffer.append(next_hidden_state)
