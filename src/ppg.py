@@ -30,7 +30,8 @@ device = th.device("cuda:0" if th.cuda.is_available() else "cpu")
 TRAIN_WHOLE_MODEL = False
 
 
-class ProximalPolicyOptimizer:
+
+class PhasicPolicyGradient:
     def __init__(
             self,
             env_name: str,
@@ -55,14 +56,13 @@ class ProximalPolicyOptimizer:
             gamma: float,
             lam: float,
 
+
             mem_buffer_size: int,
             # tau: float = 0.95,
 
             # Optional: plot stuff
             plot: bool,
-            num_envs: int,
-
-
+            num_envs: int
 
     ):
         model_path = f"models/{model}.model"
@@ -120,34 +120,71 @@ class ProximalPolicyOptimizer:
         pi_head_kwargs = agent_parameters["model"]["args"]["pi_head_opts"]
         pi_head_kwargs["temperature"] = float(pi_head_kwargs["temperature"])
 
+
+        # Make our agents
+
         self.agent = MineRLAgent(self.envs, policy_kwargs=policy_kwargs,
                                  pi_head_kwargs=pi_head_kwargs)
         self.agent.load_weights(weights_path)
 
-        policy = self.agent.policy
-
-        if TRAIN_WHOLE_MODEL:
-            self.trainable_parameters = list(policy.parameters())
-        else:
-            self.trainable_parameters = list(
-                policy.pi_head.parameters()) + list(policy.value_head.parameters())
+        actor = self.agent.policy
+        policy_params = actor.parameters()
 
         self.optim = th.optim.Adam(
-            self.trainable_parameters, lr=lr, betas=betas, weight_decay=weight_decay)
-
+            policy_params, lr=lr, betas=betas, weight_decay=weight_decay)
+        
         self.scheduler = th.optim.lr_scheduler.LambdaLR(
             self.optim, lambda x: 1 - x / num_rollouts)
+        
+        
+        # Create a SEPARATE VPT agent just for the critic
+        self.critic = MineRLAgent(self.envs, policy_kwargs=policy_kwargs,
+                                pi_head_kwargs=pi_head_kwargs)
+        self.critic.load_weights(weights_path)
+        critic_params = list(self.critic.policy.value_head.parameters()) + list(self.critic.policy.net.parameters())
 
-        # self.optim_pi = th.optim.Adam(
-        #     self.agent.policy.pi_head.parameters(), lr=lr, betas=betas)
+        # separate optimizer for the critic
+        self.critic_optim = th.optim.Adam(critic_params, lr=lr, betas=betas, weight_decay=weight_decay)
 
-        # self.optim_v = th.optim.Adam(
-        #     self.agent.policy.value_head.parameters(), lr=lr, betas=betas)
+        self.scheduler_critic = th.optim.lr_scheduler.LambdaLR(
+        self.critic_optim, lambda x: 1 - x / num_rollouts)
 
         # Internal buffer of the most recent episode memories
         # This will be a relatively large chunk of data
         # Potential memory issues / optimizations around here...
         self.memories: List[Memory] = []
+
+
+    def policy(self):
+        '''
+        Returns the policy network head, aux value head, and base
+        '''
+
+        return self.agent.policy.pi_head, self.agent.policy.value_head, self.agent.policy.net
+
+
+    def value(self):
+        '''
+        Return the current value network  head and base
+        '''
+        return self.critic.policy.value_head, self.critic.policy.net
+
+
+    def pi_and_v(self, agent_obs, policy_hidden_state, value_hidden_state, dummy_first):
+        """
+        Returns the correct policy and value outputs
+        """
+        # Shorthand for networks
+        policy, _, policy_base = self.policy()
+        value, value_base = self.value()
+
+        (pi_h, _), p_state_out = policy_base(
+            agent_obs, policy_hidden_state, context={"first": dummy_first})
+        (_, v_h), v_state_out = value_base(
+            agent_obs, value_hidden_state, context={"first": dummy_first})
+            
+        return policy(pi_h), value(v_h), p_state_out, v_state_out
+
 
     def init_plots(self):
         plt.ion()
@@ -218,7 +255,7 @@ class ProximalPolicyOptimizer:
 
         self.live_ax.legend(loc="upper right")
 
-    def rollout(self, env, next_obs=None, next_done=False, next_hidden_state=None, hard_reset: bool = False):
+    def rollout(self, env, next_obs=None, next_done=False, next_policy_hidden_state=None, hard_reset: bool = False):
         """
         Runs a rollout on the vectorized environments for `num_steps` timesteps and records the memories
 
@@ -232,15 +269,21 @@ class ProximalPolicyOptimizer:
         # Only run this in the beginning
         if next_obs is None:
             # Initialize the hidden state vector
-            next_hidden_state = self.agent.policy.initial_state(1)
+            next_policy_hidden_state = self.agent.policy.initial_state(1)
+            next_critic_hidden_state = self.critic.policy.initial_state(1)
 
             # MineRL specific technical setup
 
             # Need to do a little bit of augmentation so the dataloader accepts the initial hidden state
             # This shouldn't affect anything; initial_state just uses None instead of empty tensors
-            for i in range(len(next_hidden_state)):
-                next_hidden_state[i] = list(next_hidden_state[i])
-                next_hidden_state[i][0] = th.from_numpy(np.full(
+            for i in range(len(next_policy_hidden_state)):
+                next_policy_hidden_state[i] = list(next_policy_hidden_state[i])
+                next_policy_hidden_state[i][0] = th.from_numpy(np.full(
+                    (1, 1, 128), False)).to(device)
+                
+            for i in range(len(critic_hidden_state)):
+                critic_hidden_state[i] = list(critic_hidden_state[i])
+                critic_hidden_state[i][0] = th.from_numpy(np.full(
                     (1, 1, 128), False)).to(device)
 
             if hard_reset:
@@ -268,15 +311,22 @@ class ProximalPolicyOptimizer:
         for _ in range(self.num_steps):
             obs = next_obs
             done = next_done
-            hidden_state = next_hidden_state
+            policy_hidden_state = next_policy_hidden_state
+            critic_hidden_state = next_critic_hidden_state
 
             # We have to do some resetting...
             if done:
                 next_obs = env.reset()
-                hidden_state = self.agent.policy.initial_state(1)
-                for i in range(len(hidden_state)):
-                    hidden_state[i] = list(hidden_state[i])
-                    hidden_state[i][0] = th.from_numpy(np.full(
+                policy_hidden_state = self.agent.policy.initial_state(1)
+                for i in range(len(policy_hidden_state)):
+                    policy_hidden_state[i] = list(policy_hidden_state[i])
+                    policy_hidden_state[i][0] = th.from_numpy(np.full(
+                        (1, 1, 128), False)).to(device)
+                    
+                critic_hidden_state = self.critic.policy.initial_state(1)
+                for i in range(len(critic_hidden_state)):
+                    critic_hidden_state[i] = list(critic_hidden_state[i])
+                    critic_hidden_state[i][0] = th.from_numpy(np.full(
                         (1, 1, 128), False)).to(device)
 
             # Preprocess image
@@ -285,18 +335,9 @@ class ProximalPolicyOptimizer:
             # Basically just adds a dimension to both camera and button tensors
             agent_obs = tree_map(lambda x: x.unsqueeze(1), agent_obs)
 
-            # print("Initial Hidden State:")
-            # for i in range(len(hidden_state)):
-            #     # print(hidden_state[i][0].shape)
-            #     print(hidden_state[i][1][0].shape)
-            #     print(hidden_state[i][1][1].shape)
-            # Need to run this with no_grad or else the gradient descent will crash during training lol
             with th.no_grad():
-                (pi_h, v_h), next_hidden_state = self.agent.policy.net(
-                    agent_obs, hidden_state, context={"first": dummy_first})
-
-                pi_distribution = self.agent.policy.pi_head(pi_h)
-                v_prediction = self.agent.policy.value_head(v_h)
+                pi_distribution, v_prediction, next_policy_hidden_state, next_critic_hidden_state \
+                    = self.pi_and_v(agent_obs, policy_hidden_state, critic_hidden_state, dummy_first)
 
             action = self.agent.policy.pi_head.sample(
                 pi_distribution, deterministic=False)
@@ -317,7 +358,7 @@ class ProximalPolicyOptimizer:
 
             # Important! When we store a memory, we want the hidden state at the time of the observation as input! Not the step after
             # This is because we need to fully recreate the input when training the LSTM part of the network
-            memory = Memory(agent_obs, hidden_state, pi_h, v_h, action, action_log_prob,
+            memory = Memory(agent_obs, None, None, None, action, action_log_prob,
                             reward, 0, next_done, v_prediction)
 
             rollout_memories.append(memory)
@@ -364,12 +405,6 @@ class ProximalPolicyOptimizer:
         # Reset the reward calculator once we are done with the episode
 
         # Calculate the generalized advantage estimate
-        # This used to be done during each minibatch; however, the GAE should be more accurate
-        # if we calculate it over the entire episode... I think?
-
-        # It is not "more accurate," it MUST be calculated with rollouts after it, so in
-        # randomized minibatch would just be nonsense...
-
         # TODO need to use next_obs and next_done for this
         v_preds = list(map(lambda mem: mem.value, rollout_memories))
         rewards = list(map(lambda mem: mem.reward, rollout_memories))
@@ -404,25 +439,28 @@ class ProximalPolicyOptimizer:
         print(
             f"✅ Rollout finished (duration: {end - start} | memories: {len(rollout_memories)} | total reward: {episode_reward})")
 
-        return next_obs, next_done, next_hidden_state
+        return next_obs, next_done, next_policy_hidden_state
 
-    def learn(self):
+    def learn_ppo_phase(self):
 
         # Create dataloader from the memory buffer
         data = MemoryDataset(self.memories)
 
-        # TODO should not be shuffling, rather rolling out again
-        dl = DataLoader(data, batch_size=self.minibatch_size, shuffle=True)
+        # Shuffle is FALSE here because we are training the entire networks and rollout out again...
+        dl = DataLoader(data, batch_size=self.minibatch_size, shuffle=False)
 
         # Shorthand
-        policy = self.agent.policy
+        policy, aux, policy_base = self.policy()
+        value, value_base = self.value()
 
         for _ in tqdm(range(self.epochs), desc="🧠 Epochs"):
 
             # Note: These are batches, not individual samples
-            for agent_obs, state, recorded_pi_h, recorded_v_h, actions, old_action_log_probs, rewards, total_rewards, dones, v_old in dl:
+            for mem in dl:
+                agent_obs, state, recorded_pi_h, recorded_v_h, actions, old_action_log_probs,\
+                    rewards, total_rewards, dones, v_old = mem
+                
                 batch_size = len(dones)
-                # print(agent_obs["img"].shape)
                 v_old = v_old.to(device)
 
                 # DATALOADER WHY DO YOU LOVE ADDING DIMENSIONS?!!
@@ -432,35 +470,17 @@ class ProximalPolicyOptimizer:
                     state[i][1][1] = state[i][1][1].squeeze(1)
                 agent_obs = tree_map(lambda x: x.squeeze(1), agent_obs)
 
-                dummy_first = th.from_numpy(np.full(
-                    (batch_size, 1), False)).to(device)
+                policy_hidden_state, critic_hidden_state = state
+                pi_distribution, v_prediction = self.pi_and_v(agent_obs, policy_hidden_state, critic_hidden_state)
+                v_prediction.to(device)
 
-                # print(dummy_first.shape)
-
-                if TRAIN_WHOLE_MODEL:
-                    (pi_h, v_h), state_out = policy.net(
-                        agent_obs, state, context={"first": dummy_first})
-
-                else:
-                    # Use the hidden state calculated at the time since the model shouldn't change
-                    pi_h, v_h = recorded_pi_h, recorded_v_h
-
-                pi_distribution = self.agent.policy.pi_head(pi_h)
-                v_prediction = self.agent.policy.value_head(v_h).to(device)
-
-                # Overwrite the rewards now
-                # This line makes no sense because it is a holdover from when GAE was still calculated here
-                # NORMALIZE THE GAE PER MINIBATCH
+                # The returns are stored in the `reward` field in memory, for some reason
                 returns = normalize(rewards)
-                # returns = th.tensor(rewards).float().to(device)
 
                 # Calculate the explained variance, to see how accurate the GAE really is...
-                # print(rewards.shape)
-                # print(v_prediction.shape)
                 explained_variance = 1 - \
                     th.sub(returns, v_prediction).var() / returns.var()
 
-                # print(rewards)
                 # Get log probs
                 action_log_probs = self.agent.policy.get_logprob_of_action(
                     pi_distribution, actions)
@@ -468,7 +488,7 @@ class ProximalPolicyOptimizer:
                 entropy = self.agent.policy.pi_head.entropy(
                     pi_distribution).to(device)
 
-                # Calculate clipped surrogate objective
+                # Calculate clipped surrogate objective loss
                 ratios = (action_log_probs -
                           old_action_log_probs).exp().to(device)
                 advantages = normalize(
@@ -478,32 +498,25 @@ class ProximalPolicyOptimizer:
                     1 - self.eps_clip, 1 + self.eps_clip) * advantages
                 policy_loss = - th.min(surr1, surr2) - self.beta_s * entropy
 
-                # Calculate clipped value loss
-                # TODO we do not need to clip this - might even be worse than not
-                value_clipped = (v_old +
-                                 (v_prediction - v_old).clamp(-self.value_clip, self.value_clip)).to(device)
+                # Backprop for policy
+                self.optim.zero_grad()
+                policy_loss.backward()
+                self.optim.step()
 
-                # TODO what is this?
-                value_loss_1 = (value_clipped.squeeze() - returns) ** 2
-                value_loss_2 = (v_prediction.squeeze() - returns) ** 2
-
-                value_loss = th.mean(th.max(value_loss_1, value_loss_2))
-
-                loss = policy_loss.mean() + self.value_loss_weight * value_loss
+                # Calculate unclipped value loss
+                value_loss = 0.5 * (v_prediction.squeeze() - returns) ** 2
+                # Backprop for critic
+                self.optim.zero_grad()
+                value_loss.backward()
+                self.critic_optim.step()
 
                 if self.plot:
                     self.pi_loss_history.append(policy_loss.mean().item())
                     self.v_loss_history.append(value_loss.item())
-                    self.total_loss_history.append(loss.item())
 
                     self.expl_var_history.append(explained_variance.item())
 
                     self.entropy_history.append(entropy.mean().item())
-
-
-                self.optim.zero_grad()
-                loss.backward()
-                self.optim.step()
 
             # Update plot at the end of every epoch
             if self.plot:
@@ -549,11 +562,11 @@ class ProximalPolicyOptimizer:
 
         # Update learning rate
         self.scheduler.step()
-        # print(f"New learning rate: {self.scheduler.get_last_lr()}")
+        self.scheduler_critic.step()
 
     def run_train_loop(self):
         """
-        Runs the basic PPO training loop
+        Runs the basic PPG training loop
         """
         if self.plot:
             self.init_plots()
@@ -608,15 +621,26 @@ class ProximalPolicyOptimizer:
             dones = dones_buffer
             states = states_buffer
 
-            self.learn()
+            self.learn_ppo_phase()
+
+            
+
+            for _ in range(self.sleep_cycles):
+                # optimize Ljoint wrt policy weights
+
+                # optimize Lvalue wrt value weights
+
+
 
             # clear memories after every rollout
             self.memories.clear()
 
 
+
+
 if __name__ == "__main__":
 
-    ppo = ProximalPolicyOptimizer(
+    ppg = PhasicPolicyGradient(
         env_name="MineRLPunchCowEz-v0",
         model="foundation-model-1x",
         weights="foundation-model-1x",
@@ -640,4 +664,4 @@ if __name__ == "__main__":
         plot=True,
     )
 
-    ppo.run_train_loop()
+    ppg.run_train_loop()
