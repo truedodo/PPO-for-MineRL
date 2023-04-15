@@ -537,6 +537,7 @@ class ProximalPolicyOptimizer:
                     self.entropy_history.append(entropy.mean().item())
                     self.kl_div_history.append(kl_div.mean().item())
 
+                self.optim.zero_grad()
                 loss.backward()
 
                 # th.nn.utils.clip_grad_norm_(
@@ -670,7 +671,7 @@ if __name__ == "__main__":
         num_steps=50,
         epochs=4,
         minibatch_size=48,
-        lr=2.5e-4,
+        lr=2.5e-5,
         weight_decay=0,
         betas=(0.9, 0.999),
         beta_s=0.2,
