@@ -5,6 +5,7 @@ models/*
 weights/*
 
 logs/
+runs/
 
 .DS_Store
 
