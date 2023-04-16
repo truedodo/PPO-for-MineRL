@@ -1,4 +1,3 @@
-
 import pickle
 import sys
 import time
@@ -13,7 +12,7 @@ import copy
 
 from datetime import datetime
 from tqdm import tqdm
-from memory import Memory, MemoryDataset
+from memory import Memory, MemoryDataset, AuxMemory
 from util import to_torch_tensor, normalize, safe_reset, hard_reset, calculate_gae
 from vectorized_minerl import *
 
@@ -153,6 +152,7 @@ class PhasicPolicyGradient:
         # This will be a relatively large chunk of data
         # Potential memory issues / optimizations around here...
         self.memories: List[Memory] = []
+        self.aux_memories: List[Memory] = []
 
 
     def policy(self):
@@ -255,7 +255,7 @@ class PhasicPolicyGradient:
 
         self.live_ax.legend(loc="upper right")
 
-    def rollout(self, env, next_obs=None, next_done=False, next_policy_hidden_state=None, hard_reset: bool = False):
+    def rollout(self, env, next_obs=None, next_done=False, next_policy_hidden_state=None, next_critic_hidden_state=None, hard_reset: bool = False):
         """
         Runs a rollout on the vectorized environments for `num_steps` timesteps and records the memories
 
@@ -281,9 +281,9 @@ class PhasicPolicyGradient:
                 next_policy_hidden_state[i][0] = th.from_numpy(np.full(
                     (1, 1, 128), False)).to(device)
                 
-            for i in range(len(critic_hidden_state)):
-                critic_hidden_state[i] = list(critic_hidden_state[i])
-                critic_hidden_state[i][0] = th.from_numpy(np.full(
+            for i in range(len(next_critic_hidden_state)):
+                next_critic_hidden_state[i] = list(next_critic_hidden_state[i])
+                next_critic_hidden_state[i][0] = th.from_numpy(np.full(
                     (1, 1, 128), False)).to(device)
 
             if hard_reset:
@@ -358,7 +358,7 @@ class PhasicPolicyGradient:
 
             # Important! When we store a memory, we want the hidden state at the time of the observation as input! Not the step after
             # This is because we need to fully recreate the input when training the LSTM part of the network
-            memory = Memory(agent_obs, None, None, None, action, action_log_prob,
+            memory = Memory(agent_obs, 0, 0, 0, action, action_log_prob,
                             reward, 0, next_done, v_prediction)
 
             rollout_memories.append(memory)
@@ -421,7 +421,7 @@ class PhasicPolicyGradient:
             rollout_memories[i].total_reward = episode_reward
 
         # Update internal memory buffer
-        self.memories.extend(rollout_memories)
+        self.memories.append(rollout_memories)
 
         if self.plot:
             # Update the reward plot
@@ -439,15 +439,12 @@ class PhasicPolicyGradient:
         print(
             f"✅ Rollout finished (duration: {end - start} | memories: {len(rollout_memories)} | total reward: {episode_reward})")
 
-        return next_obs, next_done, next_policy_hidden_state
+        return next_obs, next_done, next_policy_hidden_state, next_critic_hidden_state
 
-    def learn_ppo_phase(self):
+    def learn_ppo_phase(self, policy_hidden_states, critic_hidden_states):
+        assert self.num_envs % self.minibatch_size % self.minibatch_size == 0 
 
-        # Create dataloader from the memory buffer
-        data = MemoryDataset(self.memories)
-
-        # Shuffle is FALSE here because we are training the entire networks and rollout out again...
-        dl = DataLoader(data, batch_size=self.minibatch_size, shuffle=False)
+        memories_arr = np.array(self.memories)
 
         # Shorthand
         policy, aux, policy_base = self.policy()
@@ -455,56 +452,110 @@ class PhasicPolicyGradient:
 
         for _ in tqdm(range(self.epochs), desc="🧠 Epochs"):
 
-            # Note: These are batches, not individual samples
-            for mem in dl:
-                agent_obs, state, recorded_pi_h, recorded_v_h, actions, old_action_log_probs,\
-                    rewards, total_rewards, dones, v_old = mem
-                
-                batch_size = len(dones)
-                v_old = v_old.to(device)
+            inds = np.arange(self.num_envs)
+            np.random.shuffle(inds)
 
-                # DATALOADER WHY DO YOU LOVE ADDING DIMENSIONS?!!
-                for i in range(len(state)):
-                    state[i][0] = state[i][0].squeeze(1)
-                    state[i][1][0] = state[i][1][0].squeeze(1)
-                    state[i][1][1] = state[i][1][1].squeeze(1)
-                agent_obs = tree_map(lambda x: x.squeeze(1), agent_obs)
+            minibatches = np.reshape(inds, (self.minibatch_size, self.num_envs // self.minibatch_size))
 
-                policy_hidden_state, critic_hidden_state = state
-                pi_distribution, v_prediction = self.pi_and_v(agent_obs, policy_hidden_state, critic_hidden_state)
-                v_prediction.to(device)
+            # Note: These are SEQUENCES, NOT individual STPES
+            for mb_inds in minibatches:
+                rollouts = memories_arr[mb_inds]
 
-                # The returns are stored in the `reward` field in memory, for some reason
-                returns = normalize(rewards)
+                if policy_hidden_states[0] is None:
+                    # Initialize the hidden state vector
+                    policy_hidden_states = [self.agent.policy.initial_state(1) for _ in mb_inds]
+                    critic_hidden_states = [self.critic.policy.initial_state(1) for _ in mb_inds]
 
-                # Calculate the explained variance, to see how accurate the GAE really is...
-                explained_variance = 1 - \
-                    th.sub(returns, v_prediction).var() / returns.var()
+                # Get the initial states for the current minibatches
+                mb_policy_states = np.array(policy_hidden_states)[mb_inds]
+                mb_critic_states = np.array(critic_hidden_states)[mb_inds]
 
-                # Get log probs
-                action_log_probs = self.agent.policy.get_logprob_of_action(
-                    pi_distribution, actions)
+                policy_losses = []
+                value_losses = []
+                for rollout, policy_hidden_state, critic_hidden_state in \
+                    zip(rollouts, mb_policy_states, mb_critic_states):
 
-                entropy = self.agent.policy.pi_head.entropy(
-                    pi_distribution).to(device)
+                    # Want to get all of the steps from this rollout vectorized,
+                    # this is an easy way
+                    dl = DataLoader(MemoryDataset(rollout), batch_size=self.num_steps, shuffle=False)
+                    for _, _, _, _, _, vec_old_action_log_probs, vec_rewards, _, _, _ in dl:
+                        rewards = vec_rewards.squeeze()
+                        old_action_log_probs = vec_old_action_log_probs.squeeze()
 
-                # Calculate clipped surrogate objective loss
-                ratios = (action_log_probs -
-                          old_action_log_probs).exp().to(device)
-                advantages = normalize(
-                    returns - v_prediction.detach().to(device))
-                surr1 = ratios * advantages
-                surr2 = ratios.clamp(
-                    1 - self.eps_clip, 1 + self.eps_clip) * advantages
-                policy_loss = - th.min(surr1, surr2) - self.beta_s * entropy
+                    # reroll out the memories using the same initial hidden state
+                    log_probs = []
+                    new_values = []
+                    entropy = []
+                    dummy_first = th.from_numpy(np.array((False,))).unsqueeze(1)
+                    aux_mems = []
+                    for memory in rollout:
+                        # Save the auxillary memories here, too
+                        aux_mem = AuxMemory(memory.agent_obs, memory.reward)
+                        aux_mems.append(aux_mem)
+
+                        # Now start the actual rolling out
+                        agent_obs = memory.agent_obs
+                        pi_distribution, v_prediction, policy_hidden_state, critic_hidden_state \
+                                = self.pi_and_v(agent_obs, policy_hidden_state, critic_hidden_state, dummy_first)
+
+                        # Get log probs, entropy, and new values
+                        action_log_prob = self.agent.policy.get_logprob_of_action(
+                            pi_distribution, memory.action)
+                        e = self.agent.policy.pi_head.entropy(pi_distribution)
+
+                        log_probs.append(action_log_prob)
+                        new_values.append(v_prediction)
+                        entropy.append(e)
+
+                        # If we are moving on to a new episode, reset the state
+                        if memory.done:
+                            policy_hidden_states = self.agent.policy.initial_state(1) 
+                            critic_hidden_states = self.critic.policy.initial_state(1)
+
+                    self.aux_memories.append(aux_mems)
+
+                    action_log_probs = torch.cat(log_probs)
+                    v_prediction = torch.cat(new_values)
+                    entropy = torch.cat(entropy)
+                            
+                    # The returns are stored in the `reward` field in memory, for some reason
+                    returns = normalize(rewards)
+
+                    # Calculate the explained variance, to see how accurate the GAE really is...
+                    explained_variance = 1 - \
+                        th.sub(returns, v_prediction).var() / returns.var()
+
+
+
+                    # Calculate clipped surrogate objective loss
+                    ratios = (action_log_probs -
+                            old_action_log_probs).exp().to(device)
+                    advantages = normalize(
+                        returns - v_prediction.detach().to(device))
+                    surr1 = ratios * advantages
+                    surr2 = ratios.clamp(
+                        1 - self.eps_clip, 1 + self.eps_clip) * advantages
+                    policy_loss = - th.min(surr1, surr2) - self.beta_s * entropy
+
+                    # Calculate unclipped value loss
+                    value_loss = 0.5 * (v_prediction.squeeze() - returns) ** 2
+
+                    policy_losses.append(policy_loss)
+                    value_losses.append(value_loss)
+
+                # accumulate the loss from the minibatches
+                # TODO make sure axes are correct here with mean
+                policy_loss = torch.cat(policy_losses)
+                value_loss = torch.cat(value_losses)
+
+                policy_loss.mean()
+                value_loss.mean()
 
                 # Backprop for policy
                 self.optim.zero_grad()
                 policy_loss.backward()
                 self.optim.step()
 
-                # Calculate unclipped value loss
-                value_loss = 0.5 * (v_prediction.squeeze() - returns) ** 2
                 # Backprop for critic
                 self.optim.zero_grad()
                 value_loss.backward()
@@ -573,7 +624,8 @@ class PhasicPolicyGradient:
 
         obss = [None]*self.num_envs
         dones = [False]*self.num_envs
-        states = [None]*self.num_envs
+        policy_states = [None]*self.num_envs
+        critic_states = [None]*self.num_envs
 
         for i in range(self.num_rollouts):
 
@@ -609,25 +661,33 @@ class PhasicPolicyGradient:
 
             obss_buffer = []
             dones_buffer = []
-            states_buffer = []
-            for env, next_obs, next_done, next_hidden_state in zip(self.envs, obss, dones, states):
-                next_obs, next_done, next_hidden_state = self.rollout(
-                    env, next_obs, next_done, next_hidden_state, hard_reset=should_hard_reset)
+            policy_states_buffer = []
+            critic_states_buffer = []
+            for env, next_obs, next_done, next_policy_hidden_state, next_critic_hidden_state \
+                  in zip(self.envs, obss, dones, policy_states, critic_states):
+                next_obs, next_done, next_policy_hidden_state, next_critic_hidden_state = self.rollout(
+                    env, next_obs, next_done, next_policy_hidden_state, next_critic_hidden_state, hard_reset=should_hard_reset)
                 obss_buffer.append(next_obs)
                 dones_buffer.append(next_done)
-                states_buffer.append(next_hidden_state)
+                policy_states_buffer.append(next_policy_hidden_state)
+                critic_states_buffer.append(next_critic_hidden_state)
 
+            # Need to give initial states from this rollout to re-rollout in learning with LSTM model
+            self.learn_ppo_phase(policy_states, critic_states)
+
+            # Update from buffers AFTER learning...
             obss = obss_buffer
             dones = dones_buffer
-            states = states_buffer
+            policy_states = policy_states_buffer
+            critic_states = critic_states_buffer
 
-            self.learn_ppo_phase()
 
-            
+            # calculate policy priors
+
 
             for _ in range(self.sleep_cycles):
                 # optimize Ljoint wrt policy weights
-
+                pass
                 # optimize Lvalue wrt value weights
 
 
@@ -646,11 +706,11 @@ if __name__ == "__main__":
         weights="foundation-model-1x",
         out_weights="cow-deleter-1x",
         save_every=5,
-        num_envs=4,
+        num_envs=1,
         num_rollouts=500,
         num_steps=50,
         epochs=6,
-        minibatch_size=48,
+        minibatch_size=1,
         lr=2.5e-5,
         weight_decay=0,
         betas=(0.9, 0.999),

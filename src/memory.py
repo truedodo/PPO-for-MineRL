@@ -14,6 +14,19 @@ class Memory:
 
     # Raw pixel observation for this frame
     agent_obs: dict
+    v_targ: float
+
+
+@dataclass
+class AuxMemory:
+    """
+    This class represents auxillary memory for PPG
+    Only has an obs and the target value (return)
+    Stored in `B` in paper
+    """
+
+    # Raw pixel observation for this frame
+    agent_obs: dict
     hidden_state: list
     pi_h: th.tensor
     v_h: th.tensor
@@ -23,7 +36,6 @@ class Memory:
     total_reward: float
     done: bool
     value: float
-
 
 class MemoryDataset(Dataset):
     """
