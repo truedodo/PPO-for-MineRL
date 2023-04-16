@@ -694,6 +694,7 @@ class PhasicPolicyGradient:
 
             # clear memories after every rollout
             self.memories.clear()
+            self.aux_memories.clear()
 
 
 

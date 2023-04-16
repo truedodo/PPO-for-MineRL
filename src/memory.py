@@ -14,7 +14,15 @@ class Memory:
 
     # Raw pixel observation for this frame
     agent_obs: dict
-    v_targ: float
+    hidden_state: list
+    pi_h: th.tensor
+    v_h: th.tensor
+    action: np.ndarray
+    action_log_prob: np.ndarray
+    reward: float
+    total_reward: float
+    done: bool
+    value: float
 
 
 @dataclass
@@ -27,15 +35,7 @@ class AuxMemory:
 
     # Raw pixel observation for this frame
     agent_obs: dict
-    hidden_state: list
-    pi_h: th.tensor
-    v_h: th.tensor
-    action: np.ndarray
-    action_log_prob: np.ndarray
-    reward: float
-    total_reward: float
-    done: bool
-    value: float
+    v_targ: float
 
 class MemoryDataset(Dataset):
     """
