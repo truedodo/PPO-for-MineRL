@@ -57,7 +57,7 @@ class PhasicPolicyGradient:
 
 
             mem_buffer_size: int,
-            # tau: float = 0.95,
+            sleep_cycles: int,
 
             # Optional: plot stuff
             plot: bool,
@@ -89,7 +89,7 @@ class PhasicPolicyGradient:
         self.value_loss_weight = value_loss_weight
         self.gamma = gamma
         self.lam = lam
-        # self.tau = tau
+        self.sleep_cycles = sleep_cycles
 
         self.plot = plot
 
@@ -514,9 +514,9 @@ class PhasicPolicyGradient:
 
                     self.aux_memories.append(aux_mems)
 
-                    action_log_probs = torch.cat(log_probs)
-                    v_prediction = torch.cat(new_values)
-                    entropy = torch.cat(entropy)
+                    action_log_probs = torch.cat(log_probs).squeeze()
+                    v_prediction = torch.cat(new_values).squeeze()
+                    entropy = torch.cat(entropy).squeeze()
                             
                     # The returns are stored in the `reward` field in memory, for some reason
                     returns = normalize(rewards)
@@ -544,12 +544,8 @@ class PhasicPolicyGradient:
                     value_losses.append(value_loss)
 
                 # accumulate the loss from the minibatches
-                # TODO make sure axes are correct here with mean
-                policy_loss = torch.cat(policy_losses)
-                value_loss = torch.cat(value_losses)
-
-                policy_loss.mean()
-                value_loss.mean()
+                policy_loss = torch.cat(policy_losses).mean()
+                value_loss = torch.cat(value_losses).mean()
 
                 # Backprop for policy
                 self.optim.zero_grad()
@@ -684,7 +680,6 @@ class PhasicPolicyGradient:
 
             # calculate policy priors
 
-
             for _ in range(self.sleep_cycles):
                 # optimize Ljoint wrt policy weights
                 pass
@@ -721,6 +716,7 @@ if __name__ == "__main__":
         value_loss_weight=0.2,
         gamma=0.99,
         lam=0.95,
+        sleep_cycles=0,
         mem_buffer_size=10000,
         plot=True,
     )
