@@ -56,8 +56,10 @@ class PhasicPolicyGradient:
             lam: float,
 
 
+
             mem_buffer_size: int,
             sleep_cycles: int,
+            beta_clone: float,
 
             # Optional: plot stuff
             plot: bool,
@@ -90,6 +92,7 @@ class PhasicPolicyGradient:
         self.gamma = gamma
         self.lam = lam
         self.sleep_cycles = sleep_cycles
+        self.beta_clone = beta_clone
 
         self.plot = plot
 
@@ -170,7 +173,7 @@ class PhasicPolicyGradient:
         return self.critic.policy.value_head, self.critic.policy.net
 
 
-    def pi_and_v(self, agent_obs, policy_hidden_state, value_hidden_state, dummy_first, aux=False):
+    def pi_and_v(self, agent_obs, policy_hidden_state, value_hidden_state, dummy_first, use_aux=False):
         """
         Returns the correct policy and value outputs
         """
@@ -183,7 +186,7 @@ class PhasicPolicyGradient:
         (_, v_h), v_state_out = value_base(
             agent_obs, value_hidden_state, context={"first": dummy_first})
         
-        if not aux:
+        if not use_aux:
             return policy(pi_h), value(v_h), p_state_out, v_state_out
         return policy(pi_h), value(v_h), aux(aux_head), p_state_out, v_state_out
 
@@ -344,7 +347,7 @@ class PhasicPolicyGradient:
 
             # Finally, render the environment to the screen
             # Comment this out if you are boring
-            # env.render()
+            env.render()
 
             if self.plot:
                 with torch.no_grad():
@@ -385,8 +388,6 @@ class PhasicPolicyGradient:
                     # Actually draw everything
                     self.live_fig.canvas.draw()
                     self.live_fig.canvas.flush_events()
-
-        # Reset the reward calculator once we are done with the episode
 
         # Calculate the generalized advantage estimate
         # TODO need to use next_obs and next_done for this
@@ -436,7 +437,7 @@ class PhasicPolicyGradient:
         assert self.num_envs % self.minibatch_size == 0 
         memories_arr = np.array(self.memories)
 
-        for _ in tqdm(range(self.epochs), desc="🧠 Epochs"):
+        for _ in tqdm(range(self.epochs), desc="🧠 Policy Epochs"):
 
             # For training the recurrent model, we do batches of *sequences*
             # that is why this is `self.num_envs` and not `self.num_envs * self.num_timesteps`
@@ -607,9 +608,9 @@ class PhasicPolicyGradient:
                 # Actually draw everything
                 self.main_fig.canvas.draw()
                 self.main_fig.canvas.flush_events()
-            # update_network(value_loss, self.optim_v)
 
         # Update learning rate
+        # TODO how to handle this in the aux phase?
         self.scheduler.step()
         self.scheduler_critic.step()
 
@@ -619,6 +620,11 @@ class PhasicPolicyGradient:
         '''
         cached_p_dists_rollouts = []
         rollouts = self.aux_memories
+
+        if policy_hidden_states[0] is None:
+            # Initialize the hidden state vector
+            policy_hidden_states = [self.agent.policy.initial_state(1) for _ in policy_hidden_states]
+            critic_hidden_states = [self.critic.policy.initial_state(1) for _ in critic_hidden_states]
 
         for rollout, policy_hidden_state, critic_hidden_state in \
             zip(rollouts, policy_hidden_states, critic_hidden_states):
@@ -649,69 +655,105 @@ class PhasicPolicyGradient:
         '''
         Run the auxiliary training phase for the value and aux value functions
         '''
-        rollouts = self.aux_memories
+        aux_arr = np.array(self.aux_memories)
+        # TODO plot for this phase too !!
 
-        for _ in range(self.sleep_cycles):
-            joint_losses = []
-            value_losses = []
-            for rollout, priors, policy_hidden_state, critic_hidden_state in \
-                zip(rollouts, policy_priors, policy_hidden_states, critic_hidden_states):
+        for _ in tqdm(range(self.sleep_cycles), desc="😴 Auxiliary Epochs"):
 
-                # Want these vectorized for later calculations
-                v_targ = torch.tensor([mem.reward for mem in rollout])
-                p_dist_old = torch.tensor([p_dist for p_dist in priors])
+            # For training the recurrent model, we do batches of *sequences*
+            # that is why this is `self.num_envs` and not `self.num_envs * self.num_timesteps`
+            inds = np.arange(self.num_envs)
+            np.random.shuffle(inds)
+            minibatches = np.reshape(inds, (self.minibatch_size, self.num_envs // self.minibatch_size))
 
-                # reroll out the memories using the same initial hidden state
-                new_values = []
-                new_pi_dists = []
-                new_aux_values = []
-                dummy_first = th.from_numpy(np.array((False,))).unsqueeze(1)
-                for memory in rollout:
+            # Note: These are SEQUENCES, NOT individual STPES
+            for mb_inds in minibatches:
+                rollouts = aux_arr[mb_inds]
 
-                    agent_obs = memory.agent_obs
-                    pi_distribution, v_prediction, aux_pred, policy_hidden_state, critic_hidden_state \
-                            = self.pi_and_v(agent_obs, policy_hidden_state, critic_hidden_state, dummy_first, aux=True)
-                    
-                    new_pi_dists.append(pi_distribution)
-                    new_values.append(v_prediction)
-                    new_aux_values.append(aux_pred)
+                ## All of the before the next for loop is to get the correct initial state to 
+                ## start rerolling out the memory, it gave me mean warnings when I didn't
+                ## do it :(
+                if policy_hidden_states[0] is None:
+                    # Initialize the hidden state vector
+                    policy_hidden_states = [self.agent.policy.initial_state(1) for _ in mb_inds]
+                    critic_hidden_states = [self.critic.policy.initial_state(1) for _ in mb_inds]
 
-                    # If we are moving on to a new episode, reset the state
-                    if memory.done:
-                        policy_hidden_state = self.agent.policy.initial_state(1) 
-                        critic_hidden_state = self.critic.policy.initial_state(1)
+                # Get the initial states for the current minibatches
+                # use np.empty for making this because np is dumb
+                mb_policy_states = np.empty(self.num_envs, dtype=object)
+                mb_critic_states = np.empty(self.num_envs, dtype=object)
+
+                mb_policy_states[:] = policy_hidden_states
+                mb_critic_states[:] = critic_hidden_states
+
+                mb_policy_states = mb_policy_states[mb_inds]
+                mb_critic_states = mb_critic_states[mb_inds]
+
+                joint_losses = []
+                value_losses = []
+                for rollout, priors, policy_hidden_state, critic_hidden_state in \
+                    zip(rollouts, policy_priors, mb_policy_states, mb_critic_states):
+
+                    # Want these vectorized for later calculations
+                    v_targ = torch.tensor([mem.v_targ for mem in rollout])
+                    # to vectorize the dists, you have to do it per element in the dict
+                    p_dist_old = {'camera':torch.cat([p_dist['camera'].detach() for p_dist in priors]),
+                                'buttons':torch.cat([p_dist['buttons'].detach() for p_dist in priors]),}
 
 
-                pi_dists = torch.cat(new_pi_dists).squeeze()
-                v_prediction = torch.cat(new_values).squeeze()
-                aux_predication = torch.cat(new_aux_values).squeeze()
+
+                    # reroll out the memories using the same initial hidden state
+                    new_values = []
+                    new_pi_dists = []
+                    new_aux_values = []
+                    dummy_first = th.from_numpy(np.array((False,))).unsqueeze(1)
+                    for memory in rollout:
+
+                        agent_obs = memory.agent_obs
+                        pi_distribution, v_prediction, aux_pred, policy_hidden_state, critic_hidden_state \
+                                = self.pi_and_v(agent_obs, policy_hidden_state, critic_hidden_state, dummy_first, use_aux=True)
                         
-                # Calculate joint loss
-                aux_loss = 0.5 * (aux_predication - v_targ) ** 2
-                kl_term = self.agent.policy.pi_head.kl_divergence(
-                    p_dist_old, pi_dists)
-                joint_loss = aux_loss + self.beta_clone * kl_term
-                joint_losses.append(joint_loss)
+                        new_pi_dists.append(pi_distribution)
+                        new_values.append(v_prediction)
+                        new_aux_values.append(aux_pred)
 
-                # Calculate unclipped value loss
-                value_loss = 0.5 * (v_prediction - v_targ) ** 2
-                value_losses.append(value_loss)
+                        # If we are moving on to a new episode, reset the state
+                        if memory.done:
+                            policy_hidden_state = self.agent.policy.initial_state(1) 
+                            critic_hidden_state = self.critic.policy.initial_state(1)
 
-            # accumulate the loss from the minibatches
-            # even though we consider minibatches of sequences, we are still taking the
-            # mean of the loss calculated for each STEP, so we are not losing out on much
-            joint_loss = torch.cat(joint_loss).mean()
-            value_loss = torch.cat(value_losses).mean()
 
-            # optimize Ljoint wrt policy weights
-            self.optim.zero_grad()
-            joint_loss.backward()
-            self.optim.step()
+                    pi_dists = {'camera':torch.cat([p_dist['camera'] for p_dist in new_pi_dists]),
+                                'buttons':torch.cat([p_dist['buttons'] for p_dist in new_pi_dists]),}
+                    aux_predication = torch.cat(new_aux_values).squeeze()
+                    v_prediction = torch.cat(new_values).squeeze()
+                            
+                    # Calculate joint loss
+                    aux_loss = 0.5 * (aux_predication - v_targ.detach()) ** 2
+                    kl_term = self.agent.policy.pi_head.kl_divergence(
+                        p_dist_old, pi_dists)
+                    joint_loss = aux_loss + self.beta_clone * kl_term
+                    joint_losses.append(joint_loss)
 
-            # optimize Lvalue wrt value weights
-            self.critic_optim.zero_grad()
-            value_loss.backward()
-            self.critic_optim.step()
+                    # Calculate unclipped value loss
+                    value_loss = 0.5 * (v_prediction - v_targ.detach()) ** 2
+                    value_losses.append(value_loss)
+
+                # accumulate the loss from the minibatches
+                # even though we consider minibatches of sequences, we are still taking the
+                # mean of the loss calculated for each STEP, so we are not losing out on much
+                joint_loss = torch.cat(joint_losses).mean()
+                value_loss = torch.cat(value_losses).mean()
+
+                # optimize Ljoint wrt policy weights
+                self.optim.zero_grad()
+                joint_loss.backward()
+                self.optim.step()
+
+                # optimize Lvalue wrt value weights
+                self.critic_optim.zero_grad()
+                value_loss.backward()
+                self.critic_optim.step()
 
     def run_train_loop(self):
         """
@@ -779,7 +821,7 @@ class PhasicPolicyGradient:
             # calculate policy priors
             policy_priors = self.calculate_policy_priors(policy_states, critic_states)
 
-            self.auxiliary_phase(policy_priors)
+            self.auxiliary_phase(policy_priors, policy_states, critic_states)
 
             self.aux_memories.clear()
 
@@ -790,20 +832,18 @@ class PhasicPolicyGradient:
             critic_states = critic_states_buffer
 
 
-
-
 if __name__ == "__main__":
 
     ppg = PhasicPolicyGradient(
         env_name="MineRLPunchCowEz-v0",
         model="foundation-model-1x",
         weights="foundation-model-1x",
-        out_weights="cow-deleter-1x",
+        out_weights="cow-deleter-ppg-1x",
         save_every=5,
         num_envs=2,
         num_rollouts=500,
-        num_steps=50,
-        epochs=6,
+        num_steps=100,
+        epochs=4,
         minibatch_size=1,
         lr=2.5e-5,
         weight_decay=0,
@@ -814,7 +854,8 @@ if __name__ == "__main__":
         value_loss_weight=0.2,
         gamma=0.99,
         lam=0.95,
-        sleep_cycles=0,
+        sleep_cycles=2,
+        beta_clone = 1,
         mem_buffer_size=10000,
         plot=True,
     )
