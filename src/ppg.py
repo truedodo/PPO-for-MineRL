@@ -151,8 +151,8 @@ class PhasicPolicyGradient:
         # Internal buffer of the most recent episode memories
         # This will be a relatively large chunk of data
         # Potential memory issues / optimizations around here...
-        self.memories: List[Memory] = []
-        self.aux_memories: List[Memory] = []
+        self.memories: List[List[Memory]] = []
+        self.aux_memories: List[List[AuxMemory]] = []
 
 
     def policy(self):
@@ -487,7 +487,7 @@ class PhasicPolicyGradient:
                     aux_mems = []
                     for i, memory in enumerate(rollout):
                         # Save the auxillary memories here, too
-                        aux_mem = AuxMemory(memory.agent_obs, memory.reward)
+                        aux_mem = AuxMemory(memory.agent_obs, memory.reward, memory.done)
                         aux_mems.append(aux_mem)
 
                         # Now start the actual rolling out
@@ -611,6 +611,39 @@ class PhasicPolicyGradient:
         self.scheduler.step()
         self.scheduler_critic.step()
 
+    def calculate_policy_priors(self, policy_hidden_states, critic_hidden_states):
+        '''
+        Calculate the p_dist for the current policy for KL loss in the aux phase
+        '''
+        cached_p_dists_rollouts = []
+        rollouts = self.aux_memories
+
+        for rollout, policy_hidden_state, critic_hidden_state in \
+            zip(rollouts, policy_hidden_states, critic_hidden_states):
+
+
+            # reroll out the memories using the same initial hidden state
+            dummy_first = th.from_numpy(np.array((False,))).unsqueeze(1)
+            pi_dists = []
+
+            for memory in rollout:
+                # Now start the actual rolling out
+                agent_obs = memory.agent_obs
+                pi_distribution, _, policy_hidden_state, critic_hidden_state \
+                        = self.pi_and_v(agent_obs, policy_hidden_state, critic_hidden_state, dummy_first)
+                
+                pi_dists.append(pi_distribution)
+
+                # If we are moving on to a new episode, reset the state
+                if memory.done:
+                    policy_hidden_state = self.agent.policy.initial_state(1) 
+                    critic_hidden_state = self.critic.policy.initial_state(1)
+
+            cached_p_dists_rollouts.append(pi_dists)
+        
+        return cached_p_dists_rollouts
+
+
     def run_train_loop(self):
         """
         Runs the basic PPG training loop
@@ -670,25 +703,23 @@ class PhasicPolicyGradient:
             # Need to give initial states from this rollout to re-rollout in learning with LSTM model
             self.learn_ppo_phase(policy_states, critic_states)
 
+
+            # we have aux memories now, clear this shit OUT
+            self.memories.clear()
+
+            # calculate policy priors
+            policy_priors = self.calculate_policy_priors(policy_states, critic_states)
+
+            for _ in range(self.sleep_cycles):
+                self.auxilliary_phase(policy_priors)
+
+            self.aux_memories.clear()
+
             # Update from buffers AFTER learning...
             obss = obss_buffer
             dones = dones_buffer
             policy_states = policy_states_buffer
             critic_states = critic_states_buffer
-
-
-            # calculate policy priors
-
-            for _ in range(self.sleep_cycles):
-                # optimize Ljoint wrt policy weights
-                pass
-                # optimize Lvalue wrt value weights
-
-
-
-            # clear memories after every rollout
-            self.memories.clear()
-            self.aux_memories.clear()
 
 
 

@@ -36,6 +36,7 @@ class AuxMemory:
     # Raw pixel observation for this frame
     agent_obs: dict
     v_targ: float
+    done: bool
 
 class MemoryDataset(Dataset):
     """
