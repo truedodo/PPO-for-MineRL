@@ -170,20 +170,22 @@ class PhasicPolicyGradient:
         return self.critic.policy.value_head, self.critic.policy.net
 
 
-    def pi_and_v(self, agent_obs, policy_hidden_state, value_hidden_state, dummy_first):
+    def pi_and_v(self, agent_obs, policy_hidden_state, value_hidden_state, dummy_first, aux=False):
         """
         Returns the correct policy and value outputs
         """
         # Shorthand for networks
-        policy, _, policy_base = self.policy()
+        policy, aux, policy_base = self.policy()
         value, value_base = self.value()
 
-        (pi_h, _), p_state_out = policy_base(
+        (pi_h, aux_head), p_state_out = policy_base(
             agent_obs, policy_hidden_state, context={"first": dummy_first})
         (_, v_h), v_state_out = value_base(
             agent_obs, value_hidden_state, context={"first": dummy_first})
-            
-        return policy(pi_h), value(v_h), p_state_out, v_state_out
+        
+        if not aux:
+            return policy(pi_h), value(v_h), p_state_out, v_state_out
+        return policy(pi_h), value(v_h), aux(aux_head), p_state_out, v_state_out
 
 
     def init_plots(self):
@@ -553,7 +555,7 @@ class PhasicPolicyGradient:
                 self.optim.step()
 
                 # Backprop for critic
-                self.optim.zero_grad()
+                self.critic_optim.zero_grad()
                 value_loss.backward()
                 self.critic_optim.step()
 
@@ -643,6 +645,73 @@ class PhasicPolicyGradient:
         
         return cached_p_dists_rollouts
 
+    def auxiliary_phase(self, policy_priors, policy_hidden_states, critic_hidden_states):
+        '''
+        Run the auxiliary training phase for the value and aux value functions
+        '''
+        rollouts = self.aux_memories
+
+        for _ in range(self.sleep_cycles):
+            joint_losses = []
+            value_losses = []
+            for rollout, priors, policy_hidden_state, critic_hidden_state in \
+                zip(rollouts, policy_priors, policy_hidden_states, critic_hidden_states):
+
+                # Want these vectorized for later calculations
+                v_targ = torch.tensor([mem.reward for mem in rollout])
+                p_dist_old = torch.tensor([p_dist for p_dist in priors])
+
+                # reroll out the memories using the same initial hidden state
+                new_values = []
+                new_pi_dists = []
+                new_aux_values = []
+                dummy_first = th.from_numpy(np.array((False,))).unsqueeze(1)
+                for memory in rollout:
+
+                    agent_obs = memory.agent_obs
+                    pi_distribution, v_prediction, aux_pred, policy_hidden_state, critic_hidden_state \
+                            = self.pi_and_v(agent_obs, policy_hidden_state, critic_hidden_state, dummy_first, aux=True)
+                    
+                    new_pi_dists.append(pi_distribution)
+                    new_values.append(v_prediction)
+                    new_aux_values.append(aux_pred)
+
+                    # If we are moving on to a new episode, reset the state
+                    if memory.done:
+                        policy_hidden_state = self.agent.policy.initial_state(1) 
+                        critic_hidden_state = self.critic.policy.initial_state(1)
+
+
+                pi_dists = torch.cat(new_pi_dists).squeeze()
+                v_prediction = torch.cat(new_values).squeeze()
+                aux_predication = torch.cat(new_aux_values).squeeze()
+                        
+                # Calculate joint loss
+                aux_loss = 0.5 * (aux_predication - v_targ) ** 2
+                kl_term = self.agent.policy.pi_head.kl_divergence(
+                    p_dist_old, pi_dists)
+                joint_loss = aux_loss + self.beta_clone * kl_term
+                joint_losses.append(joint_loss)
+
+                # Calculate unclipped value loss
+                value_loss = 0.5 * (v_prediction - v_targ) ** 2
+                value_losses.append(value_loss)
+
+            # accumulate the loss from the minibatches
+            # even though we consider minibatches of sequences, we are still taking the
+            # mean of the loss calculated for each STEP, so we are not losing out on much
+            joint_loss = torch.cat(joint_loss).mean()
+            value_loss = torch.cat(value_losses).mean()
+
+            # optimize Ljoint wrt policy weights
+            self.optim.zero_grad()
+            joint_loss.backward()
+            self.optim.step()
+
+            # optimize Lvalue wrt value weights
+            self.critic_optim.zero_grad()
+            value_loss.backward()
+            self.critic_optim.step()
 
     def run_train_loop(self):
         """
@@ -710,8 +779,7 @@ class PhasicPolicyGradient:
             # calculate policy priors
             policy_priors = self.calculate_policy_priors(policy_states, critic_states)
 
-            for _ in range(self.sleep_cycles):
-                self.auxilliary_phase(policy_priors)
+            self.auxiliary_phase(policy_priors)
 
             self.aux_memories.clear()
 
