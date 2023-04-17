@@ -429,24 +429,27 @@ class PhasicPolicyGradient:
         return next_obs, next_done, next_policy_hidden_state, next_critic_hidden_state
 
     def learn_ppo_phase(self, policy_hidden_states, critic_hidden_states):
-        assert self.num_envs % self.minibatch_size % self.minibatch_size == 0 
-        memories_arr = np.array(self.memories)
 
-        # Shorthand
-        policy, aux, policy_base = self.policy()
-        value, value_base = self.value()
+        # For simplicity
+        assert self.num_envs % self.minibatch_size == 0 
+        memories_arr = np.array(self.memories)
 
         for _ in tqdm(range(self.epochs), desc="🧠 Epochs"):
 
+            # For training the recurrent model, we do batches of *sequences*
+            # that is why this is `self.num_envs` and not `self.num_envs * self.num_timesteps`
             inds = np.arange(self.num_envs)
             np.random.shuffle(inds)
-
             minibatches = np.reshape(inds, (self.minibatch_size, self.num_envs // self.minibatch_size))
 
             # Note: These are SEQUENCES, NOT individual STPES
             for mb_inds in minibatches:
                 rollouts = memories_arr[mb_inds]
 
+
+                ## All of the before the next for loop is to get the correct initial state to 
+                ## start rerolling out the memory, it gave me mean warnings when I didn't
+                ## do it :(
                 if policy_hidden_states[0] is None:
                     # Initialize the hidden state vector
                     policy_hidden_states = [self.agent.policy.initial_state(1) for _ in mb_inds]
@@ -466,14 +469,17 @@ class PhasicPolicyGradient:
 
                 policy_losses = []
                 value_losses = []
+
                 for rollout, policy_hidden_state, critic_hidden_state in \
                     zip(rollouts, mb_policy_states, mb_critic_states):
 
-                    # Want these vectorized
+                    # Want these vectorized for later calculations
                     rewards = torch.tensor([mem.reward for mem in rollout])
                     old_action_log_probs = torch.tensor([mem.action_log_prob for mem in rollout])
 
                     # reroll out the memories using the same initial hidden state
+                    # I think rerolling out is important for correct gradients for the
+                    # recurrent model? that is basically speculation, though
                     log_probs = []
                     new_values = []
                     entropy = []
@@ -481,17 +487,20 @@ class PhasicPolicyGradient:
                     aux_mems = []
                     for i, memory in enumerate(rollout):
                         # Save the auxillary memories here, too
-                        # aux_mem = AuxMemory(memory.agent_obs, memory.reward)
-                        # aux_mems.append(aux_mem)
+                        aux_mem = AuxMemory(memory.agent_obs, memory.reward)
+                        aux_mems.append(aux_mem)
 
                         # Now start the actual rolling out
                         agent_obs = memory.agent_obs
                         pi_distribution, v_prediction, policy_hidden_state, critic_hidden_state \
                                 = self.pi_and_v(agent_obs, policy_hidden_state, critic_hidden_state, dummy_first)
 
-                        # Get log probs, entropy, and new values
+                        # Get the log prob of the RECORDED action based on the NEW pi_dist
                         action_log_prob = self.agent.policy.get_logprob_of_action(
                             pi_distribution, memory.action)
+                        
+                        # Entropy of NEW pi_dist
+                        # TODO replace with KL divergence
                         e = self.agent.policy.pi_head.entropy(pi_distribution)
 
                         log_probs.append(action_log_prob)
@@ -516,8 +525,6 @@ class PhasicPolicyGradient:
                     explained_variance = 1 - \
                         th.sub(returns, v_prediction).var() / returns.var()
 
-
-
                     # Calculate clipped surrogate objective loss
                     ratios = (action_log_probs -
                             old_action_log_probs).exp().to(device)
@@ -535,6 +542,8 @@ class PhasicPolicyGradient:
                     value_losses.append(value_loss)
 
                 # accumulate the loss from the minibatches
+                # even though we consider minibatches of sequences, we are still taking the
+                # mean of the loss calculated for each STEP, so we are not losing out on much
                 policy_loss = torch.cat(policy_losses).mean()
                 value_loss = torch.cat(value_losses).mean()
 
