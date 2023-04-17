@@ -3,6 +3,7 @@ notebooks/logs
 
 models/*
 weights/*
+out/*
 
 logs/
 

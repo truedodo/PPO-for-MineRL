@@ -37,7 +37,7 @@ def hard_reset(env):
     return obs, env
 
 
-def calculate_gae(rewards: list, values: list, masks: list, gamma: float, lam: float):
+def calculate_gae(rewards: list, values: list, masks: list, gamma: float, lam: float, next_obs_val = 0):
     """
     Calculate the generalized advantage estimate
     """
@@ -45,7 +45,7 @@ def calculate_gae(rewards: list, values: list, masks: list, gamma: float, lam: f
     returns = []
 
     for step in reversed(range(len(rewards))):
-        next_value = values[step + 1] if step < len(rewards) - 1 else 0
+        next_value = values[step + 1] if step < len(rewards) - 1 else next_obs_val
         delta = rewards[step] + gamma * \
             next_value * masks[step] - values[step]
         gae = delta + gamma * lam * masks[step] * gae

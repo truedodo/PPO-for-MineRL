@@ -272,20 +272,6 @@ class PhasicPolicyGradient:
             next_policy_hidden_state = self.agent.policy.initial_state(1)
             next_critic_hidden_state = self.critic.policy.initial_state(1)
 
-            # MineRL specific technical setup
-
-            # Need to do a little bit of augmentation so the dataloader accepts the initial hidden state
-            # This shouldn't affect anything; initial_state just uses None instead of empty tensors
-            for i in range(len(next_policy_hidden_state)):
-                next_policy_hidden_state[i] = list(next_policy_hidden_state[i])
-                next_policy_hidden_state[i][0] = th.from_numpy(np.full(
-                    (1, 1, 128), False)).to(device)
-                
-            for i in range(len(next_critic_hidden_state)):
-                next_critic_hidden_state[i] = list(next_critic_hidden_state[i])
-                next_critic_hidden_state[i][0] = th.from_numpy(np.full(
-                    (1, 1, 128), False)).to(device)
-
             if hard_reset:
                 env.close()
                 env = gym.make(self.env_name)
@@ -318,16 +304,7 @@ class PhasicPolicyGradient:
             if done:
                 next_obs = env.reset()
                 policy_hidden_state = self.agent.policy.initial_state(1)
-                for i in range(len(policy_hidden_state)):
-                    policy_hidden_state[i] = list(policy_hidden_state[i])
-                    policy_hidden_state[i][0] = th.from_numpy(np.full(
-                        (1, 1, 128), False)).to(device)
-                    
                 critic_hidden_state = self.critic.policy.initial_state(1)
-                for i in range(len(critic_hidden_state)):
-                    critic_hidden_state[i] = list(critic_hidden_state[i])
-                    critic_hidden_state[i][0] = th.from_numpy(np.full(
-                        (1, 1, 128), False)).to(device)
 
             # Preprocess image
             agent_obs = self.agent._env_obs_to_agent(obs)
@@ -365,42 +342,47 @@ class PhasicPolicyGradient:
 
             # Finally, render the environment to the screen
             # Comment this out if you are boring
-            env.render()
+            # env.render()
 
             if self.plot:
-                # Calculate the GAE up to this point
-                v_preds = list(map(lambda mem: mem.value, rollout_memories))
-                rewards = list(map(lambda mem: mem.reward, rollout_memories))
-                masks = list(
-                    map(lambda mem: 1 - float(mem.done), rollout_memories))
+                with torch.no_grad():
+                    # Calculate the GAE up to this point
+                    v_preds = list(map(lambda mem: mem.value, rollout_memories))
+                    rewards = list(map(lambda mem: mem.reward, rollout_memories))
+                    masks = list(
+                        map(lambda mem: 1 - float(mem.done), rollout_memories))
 
-                returns = calculate_gae(
-                    rewards, v_preds, masks, self.gamma, self.lam)
+                    agent_obs = self.agent._env_obs_to_agent(obs)
+                    agent_obs = tree_map(lambda x: x.unsqueeze(1), agent_obs)
+                    pi_distribution, v_prediction, next_policy_hidden_state, next_critic_hidden_state \
+                        = self.pi_and_v(agent_obs, policy_hidden_state, critic_hidden_state, dummy_first)
+                    returns = calculate_gae(
+                        rewards, v_preds, masks, self.gamma, self.lam, v_prediction)
 
-                # Update data
-                self.live_reward_history.append(reward)
-                self.live_value_history.append(v_prediction.item())
-                self.live_gae_history = returns
+                    # Update data
+                    self.live_reward_history.append(reward)
+                    self.live_value_history.append(v_prediction.item())
+                    self.live_gae_history = returns
 
-                # Update the plots
-                self.live_reward_plot.set_ydata(self.live_reward_history)
-                self.live_reward_plot.set_xdata(
-                    range(len(self.live_reward_history)))
+                    # Update the plots
+                    self.live_reward_plot.set_ydata(self.live_reward_history)
+                    self.live_reward_plot.set_xdata(
+                        range(len(self.live_reward_history)))
 
-                self.live_value_plot.set_ydata(self.live_value_history)
-                self.live_value_plot.set_xdata(
-                    range(len(self.live_value_history)))
+                    self.live_value_plot.set_ydata(self.live_value_history)
+                    self.live_value_plot.set_xdata(
+                        range(len(self.live_value_history)))
 
-                self.live_gae_plot.set_ydata(self.live_gae_history)
-                self.live_gae_plot.set_xdata(
-                    range(len(self.live_gae_history)))
+                    self.live_gae_plot.set_ydata(self.live_gae_history)
+                    self.live_gae_plot.set_xdata(
+                        range(len(self.live_gae_history)))
 
-                self.live_ax.relim()
-                self.live_ax.autoscale_view(True, True, True)
+                    self.live_ax.relim()
+                    self.live_ax.autoscale_view(True, True, True)
 
-                # Actually draw everything
-                self.live_fig.canvas.draw()
-                self.live_fig.canvas.flush_events()
+                    # Actually draw everything
+                    self.live_fig.canvas.draw()
+                    self.live_fig.canvas.flush_events()
 
         # Reset the reward calculator once we are done with the episode
 
@@ -410,7 +392,12 @@ class PhasicPolicyGradient:
         rewards = list(map(lambda mem: mem.reward, rollout_memories))
         masks = list(map(lambda mem: 1 - float(mem.done), rollout_memories))
 
-        returns = calculate_gae(rewards, v_preds, masks, self.gamma, self.lam)
+        with torch.no_grad():
+            agent_obs = self.agent._env_obs_to_agent(obs)
+            agent_obs = tree_map(lambda x: x.unsqueeze(1), agent_obs)
+            pi_distribution, v_prediction, next_policy_hidden_state, next_critic_hidden_state \
+                = self.pi_and_v(agent_obs, policy_hidden_state, critic_hidden_state, dummy_first)
+            returns = calculate_gae(rewards, v_preds, masks, self.gamma, self.lam, v_prediction)
 
         # Make changes to the memories for this episode before adding them to main buffer
         for i in range(len(rollout_memories)):
@@ -418,7 +405,7 @@ class PhasicPolicyGradient:
             rollout_memories[i].reward = returns[i]
 
             # Remember the total reward for this episode
-            rollout_memories[i].total_reward = episode_reward
+            rollout_memories[i].total_reward = episode_reward # TODO this is broken for PPG!
 
         # Update internal memory buffer
         self.memories.append(rollout_memories)
@@ -443,7 +430,6 @@ class PhasicPolicyGradient:
 
     def learn_ppo_phase(self, policy_hidden_states, critic_hidden_states):
         assert self.num_envs % self.minibatch_size % self.minibatch_size == 0 
-
         memories_arr = np.array(self.memories)
 
         # Shorthand
@@ -467,20 +453,25 @@ class PhasicPolicyGradient:
                     critic_hidden_states = [self.critic.policy.initial_state(1) for _ in mb_inds]
 
                 # Get the initial states for the current minibatches
-                mb_policy_states = np.array(policy_hidden_states)[mb_inds]
-                mb_critic_states = np.array(critic_hidden_states)[mb_inds]
+                # use np.empty for making this because np is dumb
+                mb_policy_states = np.empty(self.num_envs, dtype=object)
+                mb_critic_states = np.empty(self.num_envs, dtype=object)
+
+                mb_policy_states[:] = policy_hidden_states
+                mb_critic_states[:] = critic_hidden_states
+
+                mb_policy_states = mb_policy_states[mb_inds]
+                mb_critic_states = mb_critic_states[mb_inds]
+
 
                 policy_losses = []
                 value_losses = []
                 for rollout, policy_hidden_state, critic_hidden_state in \
                     zip(rollouts, mb_policy_states, mb_critic_states):
 
-                    # Want to get all of the steps from this rollout vectorized,
-                    # this is an easy way
-                    dl = DataLoader(MemoryDataset(rollout), batch_size=self.num_steps, shuffle=False)
-                    for _, _, _, _, _, vec_old_action_log_probs, vec_rewards, _, _, _ in dl:
-                        rewards = vec_rewards.squeeze()
-                        old_action_log_probs = vec_old_action_log_probs.squeeze()
+                    # Want these vectorized
+                    rewards = torch.tensor([mem.reward for mem in rollout])
+                    old_action_log_probs = torch.tensor([mem.action_log_prob for mem in rollout])
 
                     # reroll out the memories using the same initial hidden state
                     log_probs = []
@@ -488,10 +479,10 @@ class PhasicPolicyGradient:
                     entropy = []
                     dummy_first = th.from_numpy(np.array((False,))).unsqueeze(1)
                     aux_mems = []
-                    for memory in rollout:
+                    for i, memory in enumerate(rollout):
                         # Save the auxillary memories here, too
-                        aux_mem = AuxMemory(memory.agent_obs, memory.reward)
-                        aux_mems.append(aux_mem)
+                        # aux_mem = AuxMemory(memory.agent_obs, memory.reward)
+                        # aux_mems.append(aux_mem)
 
                         # Now start the actual rolling out
                         agent_obs = memory.agent_obs
@@ -509,8 +500,8 @@ class PhasicPolicyGradient:
 
                         # If we are moving on to a new episode, reset the state
                         if memory.done:
-                            policy_hidden_states = self.agent.policy.initial_state(1) 
-                            critic_hidden_states = self.critic.policy.initial_state(1)
+                            policy_hidden_state = self.agent.policy.initial_state(1) 
+                            critic_hidden_state = self.critic.policy.initial_state(1)
 
                     self.aux_memories.append(aux_mems)
 
@@ -627,20 +618,19 @@ class PhasicPolicyGradient:
 
             if i % self.save_every == 0:
                 state_dict = self.agent.policy.state_dict()
-                th.save(state_dict, self.out_weights_path)
+                th.save(state_dict, f'{self.out_weights_path}_{i}')
 
-                data_path = f"data/{self.training_name}.csv"
+                data_path = f"out/{self.training_name}.csv"
                 df = pd.DataFrame(
                     data={
                         "pi_loss": self.pi_loss_history,
                         "v_loss": self.v_loss_history,
-                        "total_loss": self.total_loss_history,
                         "entropy": self.entropy_history,
                         "expl_var": self.expl_var_history
                     })
                 df.to_csv(data_path, index=False)
 
-                fig_path = f"data/{self.training_name}.png"
+                fig_path = f"out/{self.training_name}.png"
                 self.main_fig.savefig(fig_path)
                 print(f"💾 Saved checkpoint data")
                 print(f"   - {self.out_weights_path}")
@@ -702,7 +692,7 @@ if __name__ == "__main__":
         weights="foundation-model-1x",
         out_weights="cow-deleter-1x",
         save_every=5,
-        num_envs=1,
+        num_envs=2,
         num_rollouts=500,
         num_steps=50,
         epochs=6,
