@@ -102,3 +102,10 @@ class EfficientVPT(nn.Module):
             th.load(path, map_location=self.device), strict=False)
         # copy the weights from the vpt value head to the real value head as well
         self.value_head.load_state_dict(self.policy.value_head.state_dict())
+
+    def load_weights(self, path):
+        """
+        Loads in weights native to this model type for baseline running
+        """
+        self.load_state_dict(
+            th.load(path, map_location=self.device), strict=False)
