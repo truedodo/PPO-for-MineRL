@@ -54,7 +54,7 @@ class PhasicPolicyGradient:
             value_loss_weight: float,
             gamma: float,
             lam: float,
-
+            beta_klp: float,
 
 
             mem_buffer_size: int,
@@ -91,6 +91,7 @@ class PhasicPolicyGradient:
         self.value_loss_weight = value_loss_weight
         self.gamma = gamma
         self.lam = lam
+        self.beta_klp = beta_klp
         self.sleep_cycles = sleep_cycles
         self.beta_clone = beta_clone
 
@@ -156,6 +157,18 @@ class PhasicPolicyGradient:
         # Potential memory issues / optimizations around here...
         self.memories: List[List[Memory]] = []
         self.aux_memories: List[List[AuxMemory]] = []
+
+        # Initialize the ORIGINAL MODEL for a KL divergence term during the Policy Phase
+        # We will use KL divergence between our policy predictions and the original policy
+        # This is to ensure that we don't deviate too far from the original policy
+        self.orig_agent = MineRLAgent(self.envs, policy_kwargs=policy_kwargs,
+                                      pi_head_kwargs=pi_head_kwargs)
+        self.orig_agent.load_weights(weights_path)\
+        
+        # initialize the hidden states of this agent
+        self.orig_hidden_states = {}
+        for i in range(self.num_envs):
+            self.orig_hidden_states[i] = self.orig_agent.policy.initial_state(1)
 
 
     def policy(self):
@@ -320,6 +333,7 @@ class PhasicPolicyGradient:
             with th.no_grad():
                 pi_distribution, v_prediction, next_policy_hidden_state, next_critic_hidden_state \
                     = self.pi_and_v(agent_obs, policy_hidden_state, critic_hidden_state, dummy_first)
+                
 
             action = self.agent.policy.pi_head.sample(
                 pi_distribution, deterministic=False)
@@ -333,9 +347,6 @@ class PhasicPolicyGradient:
 
             # Take action step in the environment
             next_obs, reward, next_done, info = env.step(minerl_action)
-
-            # Immediately disregard the reward function from the environment
-            # reward = self.rc.get_rewards(obs)
             episode_reward += reward
 
             # Important! When we store a memory, we want the hidden state at the time of the observation as input! Not the step after
@@ -347,7 +358,7 @@ class PhasicPolicyGradient:
 
             # Finally, render the environment to the screen
             # Comment this out if you are boring
-            # env.render()
+            env.render()
 
             if self.plot:
                 with torch.no_grad():
@@ -390,7 +401,6 @@ class PhasicPolicyGradient:
                     self.live_fig.canvas.flush_events()
 
         # Calculate the generalized advantage estimate
-        # TODO need to use next_obs and next_done for this
         v_preds = list(map(lambda mem: mem.value, rollout_memories))
         rewards = list(map(lambda mem: mem.reward, rollout_memories))
         masks = list(map(lambda mem: 1 - float(mem.done), rollout_memories))
@@ -449,7 +459,6 @@ class PhasicPolicyGradient:
             for mb_inds in minibatches:
                 rollouts = memories_arr[mb_inds]
 
-
                 ## All of the before the next for loop is to get the correct initial state to 
                 ## start rerolling out the memory, it gave me mean warnings when I didn't
                 ## do it :(
@@ -473,8 +482,8 @@ class PhasicPolicyGradient:
                 policy_losses = []
                 value_losses = []
 
-                for rollout, policy_hidden_state, critic_hidden_state in \
-                    zip(rollouts, mb_policy_states, mb_critic_states):
+                for rollout, policy_hidden_state, critic_hidden_state, i in \
+                    zip(rollouts, mb_policy_states, mb_critic_states, mb_inds):
 
                     # Want these vectorized for later calculations
                     rewards = torch.tensor([mem.reward for mem in rollout])
@@ -486,9 +495,12 @@ class PhasicPolicyGradient:
                     log_probs = []
                     new_values = []
                     entropy = []
+                    orig_pi_dists = []
+                    pi_dists = []
                     dummy_first = th.from_numpy(np.array((False,))).unsqueeze(1)
                     aux_mems = []
-                    for i, memory in enumerate(rollout):
+                    orig_hidden_state = self.orig_hidden_states[i]
+                    for memory in rollout:
                         # Save the auxillary memories here, too
                         aux_mem = AuxMemory(memory.agent_obs, memory.reward, memory.done)
                         aux_mems.append(aux_mem)
@@ -503,23 +515,38 @@ class PhasicPolicyGradient:
                             pi_distribution, memory.action)
                         
                         # Entropy of NEW pi_dist
-                        # TODO replace with KL divergence
                         e = self.agent.policy.pi_head.entropy(pi_distribution)
+
+                        # Get the distributions for the ORIGINAL MODEL
+                        # TODO save model hidden state?
+                        with th.no_grad():
+                            (pi_h, _), orig_hidden_state = self.orig_agent.policy.net(
+                                agent_obs, orig_hidden_state, context={"first": dummy_first})
+                            
+                            orig_pi_distribution = self.orig_agent.policy.pi_head(pi_h)
 
                         log_probs.append(action_log_prob)
                         new_values.append(v_prediction)
                         entropy.append(e)
+                        orig_pi_dists.append(orig_pi_distribution)
+                        pi_dists.append(pi_distribution)
 
                         # If we are moving on to a new episode, reset the state
                         if memory.done:
                             policy_hidden_state = self.agent.policy.initial_state(1) 
                             critic_hidden_state = self.critic.policy.initial_state(1)
+                            orig_hidden_state = self.orig_agent.policy.initial_state(1)
 
                     self.aux_memories.append(aux_mems)
 
                     action_log_probs = torch.cat(log_probs).squeeze()
                     v_prediction = torch.cat(new_values).squeeze()
                     entropy = torch.cat(entropy).squeeze()
+
+                    orig_pi_dists = {'camera':torch.cat([p_dist['camera'] for p_dist in orig_pi_dists]),
+                            'buttons':torch.cat([p_dist['buttons'] for p_dist in orig_pi_dists]),}
+                    pi_dists = {'camera':torch.cat([p_dist['camera'] for p_dist in pi_dists]),
+                            'buttons':torch.cat([p_dist['buttons'] for p_dist in pi_dists]),}
                             
                     # The returns are stored in the `reward` field in memory, for some reason
                     returns = normalize(rewards)
@@ -536,13 +563,18 @@ class PhasicPolicyGradient:
                     surr1 = ratios * advantages
                     surr2 = ratios.clamp(
                         1 - self.eps_clip, 1 + self.eps_clip) * advantages
-                    policy_loss = - th.min(surr1, surr2) - self.beta_s * entropy
+                    kl_term = self.agent.policy.pi_head.kl_divergence(orig_pi_dists, pi_dists)
+                    policy_loss = - th.min(surr1, surr2) - self.beta_s * entropy - self.beta_klp * kl_term
 
                     # Calculate unclipped value loss
                     value_loss = 0.5 * (v_prediction.squeeze() - returns) ** 2
 
                     policy_losses.append(policy_loss)
                     value_losses.append(value_loss)
+
+                # SAVE THE OUTPUT OF THE ORIG MODEL FOR NEXT PHASE
+                # as dict for ease of access in minibatch...
+                self.orig_hidden_states[i] = orig_hidden_state
 
                 # accumulate the loss from the minibatches
                 # even though we consider minibatches of sequences, we are still taking the
@@ -841,7 +873,7 @@ if __name__ == "__main__":
         weights="foundation-model-1x",
         out_weights="cow-deleter-ppo-2ent-1x",
         save_every=5,
-        num_envs=2,
+        num_envs=1,
         num_rollouts=500,
         num_steps=50,
         epochs=1,
@@ -849,12 +881,13 @@ if __name__ == "__main__":
         lr=2.5e-5,
         weight_decay=0,
         betas=(0.9, 0.999),
-        beta_s=0.2,
+        beta_s=0, # no entropy in fine tuning!
         eps_clip=0.2,
         value_clip=0.2,
         value_loss_weight=0.2,
         gamma=0.99,
         lam=0.95,
+        beta_klp = 1,
         sleep_cycles=2,
         beta_clone = 1,
         mem_buffer_size=10000,
