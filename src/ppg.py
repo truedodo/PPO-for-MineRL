@@ -347,7 +347,7 @@ class PhasicPolicyGradient:
 
             # Finally, render the environment to the screen
             # Comment this out if you are boring
-            env.render()
+            # env.render()
 
             if self.plot:
                 with torch.no_grad():
@@ -819,7 +819,8 @@ class PhasicPolicyGradient:
             self.memories.clear()
 
             # calculate policy priors
-            policy_priors = self.calculate_policy_priors(policy_states, critic_states)
+            with torch.no_grad():
+                policy_priors = self.calculate_policy_priors(policy_states, critic_states)
 
             self.auxiliary_phase(policy_priors, policy_states, critic_states)
 
@@ -838,7 +839,7 @@ if __name__ == "__main__":
         env_name="MineRLPunchCowEz-v0",
         model="foundation-model-1x",
         weights="foundation-model-1x",
-        out_weights="cow-deleter-ppg-1x",
+        out_weights="cow-deleter-ppo-2ent-1x",
         save_every=5,
         num_envs=2,
         num_rollouts=500,
