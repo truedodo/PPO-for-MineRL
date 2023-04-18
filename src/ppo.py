@@ -6,6 +6,8 @@ from typing import List
 import gym
 import torch as th
 from torch.utils.data import DataLoader
+from torch.utils.tensorboard import SummaryWriter
+
 import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
@@ -99,18 +101,6 @@ class ProximalPolicyOptimizer:
         self.mem_buffer_size = mem_buffer_size
 
         if self.plot:
-            self.pi_loss_history = []
-            self.v_loss_history = []
-            self.total_loss_history = []
-
-            self.entropy_history = []
-            self.expl_var_history = []
-            self.kl_div_history = []
-
-            self.surr1_history = []
-            self.surr2_history = []
-
-            self.reward_history = []
 
             # These statistics are calculated live during the episode running (rollout)
             self.live_reward_history = []
@@ -160,65 +150,15 @@ class ProximalPolicyOptimizer:
         # Potential memory issues / optimizations around here...
         self.memories: List[Memory] = []
 
+        self.tb_writer = SummaryWriter()
+
+        # Used for indexing tensorboard plots
+        self.num_updates = 0
+        self.num_rollouts_so_far = 0  # name conflict with num_rollouts
+
     def init_plots(self):
         plt.ion()
-        self.main_fig, self.main_ax = plt.subplots(2, 3, figsize=(12, 8))
         self.live_fig, self.live_ax = plt.subplots(1, 1, figsize=(6, 4))
-
-        # Set up policy loss plot
-        self.main_ax[0, 0].set_autoscale_on(True)
-        self.main_ax[0, 0].autoscale_view(True, True, True)
-
-        self.main_ax[0, 0].set_title("Policy Loss")
-
-        self.pi_loss_plot, = self.main_ax[0, 0].plot(
-            [], [], color="blue")
-
-        # Setup value loss plot
-        self.main_ax[0, 1].set_autoscale_on(True)
-        self.main_ax[0, 1].autoscale_view(True, True, True)
-
-        self.main_ax[0, 1].set_title("Value Loss")
-
-        self.v_loss_plot, = self.main_ax[0, 1].plot(
-            [], [], color="orange")
-
-        # Set up total loss plot
-        self.main_ax[0, 2].set_autoscale_on(True)
-        self.main_ax[0, 2].autoscale_view(True, True, True)
-
-        self.main_ax[0, 2].set_title("Total Loss")
-
-        self.total_loss_plot, = self.main_ax[0, 2].plot(
-            [], [], color="purple"
-        )
-
-        # Setup entropy plot
-        self.main_ax[1, 0].set_autoscale_on(True)
-        self.main_ax[1, 0].autoscale_view(True, True, True)
-        self.main_ax[1, 0].set_title("Policy Stats")
-
-        self.entropy_plot, = self.main_ax[1, 0].plot(
-            [], [], color="green", label="entropy")
-
-        self.kl_div_plot, = self.main_ax[1, 0].plot(
-            [], [], color="red", label="KL div")
-
-        self.main_ax[1, 0].legend(loc="upper right")
-
-        # Setup explained variance plot
-        self.main_ax[1, 1].set_autoscale_on(True)
-        self.main_ax[1, 1].autoscale_view(True, True, True)
-        self.main_ax[1, 1].set_title("Explained Variance")
-
-        self.expl_var_plot, = self.main_ax[1, 1].plot([], [], color="grey")
-
-        # Setup reward plot
-        self.main_ax[1, 2].set_autoscale_on(True)
-        self.main_ax[1, 2].autoscale_view(True, True, True)
-        self.main_ax[1, 2].set_title("Reward per Rollout Phase")
-
-        self.reward_plot,  = self.main_ax[1, 2].plot([], [], color="red")
 
         # Setup live plots
         self.live_ax.set_autoscale_on(True)
@@ -405,17 +345,20 @@ class ProximalPolicyOptimizer:
         # Update internal memory buffer
         self.memories.extend(rollout_memories)
 
-        if self.plot:
-            # Update the reward plot
-            self.reward_history.append(episode_reward)
-            self.reward_plot.set_ydata(self.reward_history)
-            self.reward_plot.set_xdata(range(len(self.reward_history)))
+        self.tb_writer.add_scalar(
+            "Rollout/Reward", episode_reward, self.num_rollouts_so_far)
+        self.num_rollouts_so_far += 1
+        # if self.plot:
+        #     # Update the reward plot
+        #     self.reward_history.append(episode_reward)
+        #     self.reward_plot.set_ydata(self.reward_history)
+        #     self.reward_plot.set_xdata(range(len(self.reward_history)))
 
-            self.main_ax[1, 2].relim()
-            self.main_ax[1, 2].autoscale_view(True, True, True)
+        #     self.main_ax[1, 2].relim()
+        #     self.main_ax[1, 2].autoscale_view(True, True, True)
 
-            self.main_fig.canvas.draw()
-            self.main_fig.canvas.flush_events()
+        #     self.main_fig.canvas.draw()
+        #     self.main_fig.canvas.flush_events()
 
         end = datetime.now()
         print(
@@ -434,7 +377,7 @@ class ProximalPolicyOptimizer:
         # Shorthand
         policy = self.agent.policy
 
-        for _ in tqdm(range(self.epochs), desc="🧠 Epochs"):
+        for epoch in tqdm(range(self.epochs), desc="🧠 Epochs"):
 
             # Note: These are batches, not individual samples
             for agent_obs, state, recorded_pi_h, recorded_v_h, actions, old_action_log_probs, rewards, total_rewards, dones, v_old in dl:
@@ -526,66 +469,72 @@ class ProximalPolicyOptimizer:
 
                 loss = policy_loss.mean() + self.value_loss_weight * value_loss
 
-                if self.plot:
-                    self.pi_loss_history.append(policy_loss.mean().item())
-                    self.v_loss_history.append(value_loss.item())
-                    self.total_loss_history.append(loss.item())
-
-                    self.expl_var_history.append(explained_variance.item())
-
-                    self.entropy_history.append(entropy.mean().item())
-                    self.kl_div_history.append(kl_div.mean().item())
-
-
                 self.optim.zero_grad()
                 loss.backward()
                 self.optim.step()
 
-            # Update plot at the end of every epoch
-            if self.plot:
-                # Update policy loss plot
-                self.pi_loss_plot.set_ydata(self.pi_loss_history)
-                self.pi_loss_plot.set_xdata(
-                    range(len(self.pi_loss_history)))
-                self.main_ax[0, 0].relim()
-                self.main_ax[0, 0].autoscale_view(True, True, True)
+                # Update tensorboard with metrics
+                self.tb_writer.add_scalar(
+                    "Loss/Policy", policy_loss.mean().item(), self.num_updates)
+                self.tb_writer.add_scalar(
+                    "Loss/Value", value_loss.item(), self.num_updates)
+                self.tb_writer.add_scalar(
+                    "Loss/Total", loss.item(), self.num_updates)
 
-                # Update value loss plot
-                self.v_loss_plot.set_ydata(self.v_loss_history)
-                self.v_loss_plot.set_xdata(
-                    range(len(self.v_loss_history)))
-                self.main_ax[0, 1].relim()
-                self.main_ax[0, 1].autoscale_view(True, True, True)
+                self.tb_writer.add_scalar(
+                    "Stats/Entropy", entropy.mean().item(), self.num_updates)
+                self.tb_writer.add_scalar(
+                    "Stats/KL Divergence from ORIGINAL", kl_div.mean().item(), self.num_updates)
+                self.tb_writer.add_scalar(
+                    "Stats/Explained Variance", explained_variance.item(), self.num_updates)
 
-                # Update total loss plot
-                self.total_loss_plot.set_ydata(self.total_loss_history)
-                self.total_loss_plot.set_xdata(
-                    range(len(self.total_loss_history)))
-                self.main_ax[0, 2].relim()
-                self.main_ax[0, 2].autoscale_view(True, True, True)
+                self.num_updates += 1
 
-                # Update the entropy plot
-                self.entropy_plot.set_ydata(self.entropy_history)
-                self.entropy_plot.set_xdata(range(len(self.entropy_history)))
+            # # Update plot at the end of every epoch
+            # if self.plot:
+            #     # Update policy loss plot
+            #     self.pi_loss_plot.set_ydata(self.pi_loss_history)
+            #     self.pi_loss_plot.set_xdata(
+            #         range(len(self.pi_loss_history)))
+            #     self.main_ax[0, 0].relim()
+            #     self.main_ax[0, 0].autoscale_view(True, True, True)
 
-                # Update KL divergence plot
-                self.kl_div_plot.set_ydata(self.kl_div_history)
-                self.kl_div_plot.set_xdata(range(len(self.kl_div_history)))
+            #     # Update value loss plot
+            #     self.v_loss_plot.set_ydata(self.v_loss_history)
+            #     self.v_loss_plot.set_xdata(
+            #         range(len(self.v_loss_history)))
+            #     self.main_ax[0, 1].relim()
+            #     self.main_ax[0, 1].autoscale_view(True, True, True)
 
-                self.main_ax[1, 0].relim()
-                self.main_ax[1, 0].autoscale_view(True, True, True)
+            #     # Update total loss plot
+            #     self.total_loss_plot.set_ydata(self.total_loss_history)
+            #     self.total_loss_plot.set_xdata(
+            #         range(len(self.total_loss_history)))
+            #     self.main_ax[0, 2].relim()
+            #     self.main_ax[0, 2].autoscale_view(True, True, True)
 
-                # Update the explained variance plot
-                self.expl_var_plot.set_ydata(self.expl_var_history)
-                self.expl_var_plot.set_xdata(
-                    range(len(self.expl_var_history)))
+            #     # Update the entropy plot
+            #     self.entropy_plot.set_ydata(self.entropy_history)
+            #     self.entropy_plot.set_xdata(range(len(self.entropy_history)))
 
-                self.main_ax[1, 1].relim()
-                self.main_ax[1, 1].autoscale_view(True, True, True)
+            #     # Update KL divergence plot
+            #     self.kl_div_plot.set_ydata(self.kl_div_history)
+            #     self.kl_div_plot.set_xdata(range(len(self.kl_div_history)))
 
-                # Actually draw everything
-                self.main_fig.canvas.draw()
-                self.main_fig.canvas.flush_events()
+            #     self.main_ax[1, 0].relim()
+            #     self.main_ax[1, 0].autoscale_view(True, True, True)
+
+            #     # Update the explained variance plot
+            #     self.expl_var_plot.set_ydata(self.expl_var_history)
+            #     self.expl_var_plot.set_xdata(
+            #         range(len(self.expl_var_history)))
+
+            #     self.main_ax[1, 1].relim()
+            #     self.main_ax[1, 1].autoscale_view(True, True, True)
+
+            #     # Actually draw everything
+            #     self.main_fig.canvas.draw()
+            #     self.main_fig.canvas.flush_events()
             # update_network(value_loss, self.optim_v)
 
         # Update learning rate
@@ -609,23 +558,23 @@ class ProximalPolicyOptimizer:
                 state_dict = self.agent.policy.state_dict()
                 th.save(state_dict, self.out_weights_path)
 
-                data_path = f"data/{self.training_name}.csv"
-                df = pd.DataFrame(
-                    data={
-                        "pi_loss": self.pi_loss_history,
-                        "v_loss": self.v_loss_history,
-                        "total_loss": self.total_loss_history,
-                        "entropy": self.entropy_history,
-                        "expl_var": self.expl_var_history
-                    })
-                df.to_csv(data_path, index=False)
+                # data_path = f"data/{self.training_name}.csv"
+                # df = pd.DataFrame(
+                #     data={
+                #         "pi_loss": self.pi_loss_history,
+                #         "v_loss": self.v_loss_history,
+                #         "total_loss": self.total_loss_history,
+                #         "entropy": self.entropy_history,
+                #         "expl_var": self.expl_var_history
+                #     })
+                # df.to_csv(data_path, index=False)
 
-                fig_path = f"data/{self.training_name}.png"
-                self.main_fig.savefig(fig_path)
+                # fig_path = f"data/{self.training_name}.png"
+                # self.main_fig.savefig(fig_path)
                 print(f"💾 Saved checkpoint data")
                 print(f"   - {self.out_weights_path}")
-                print(f"   - {data_path}")
-                print(f"   - {fig_path}")
+                # print(f"   - {data_path}")
+                # print(f"   - {fig_path}")
 
             print(
                 f"🎬 Starting {self.env_name} rollout {i + 1}/{self.num_rollouts}")
@@ -668,7 +617,7 @@ if __name__ == "__main__":
         num_steps=50,
         epochs=4,
         minibatch_size=48,
-        lr=2.5e-4,
+        lr=2.5e-5,
         weight_decay=0,
         betas=(0.9, 0.999),
         beta_s=0.2,
