@@ -518,7 +518,6 @@ class ProximalPolicyOptimizer:
                                  (v_prediction - v_old).clamp(-self.value_clip, self.value_clip)).to(device)
 
                 # TODO what is this?
-
                 value_loss_1 = (value_clipped.squeeze() - returns) ** 2
                 value_loss_2 = (v_prediction.squeeze() - returns) ** 2
 
@@ -537,10 +536,9 @@ class ProximalPolicyOptimizer:
                     self.entropy_history.append(entropy.mean().item())
                     self.kl_div_history.append(kl_div.mean().item())
 
-                loss.backward()
 
-                # th.nn.utils.clip_grad_norm_(
-                #     self.trainable_parameters, MAX_GRAD_NORM)
+                self.optim.zero_grad()
+                loss.backward()
                 self.optim.step()
 
             # Update plot at the end of every epoch

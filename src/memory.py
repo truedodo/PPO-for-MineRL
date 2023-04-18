@@ -25,6 +25,19 @@ class Memory:
     value: float
 
 
+@dataclass
+class AuxMemory:
+    """
+    This class represents auxillary memory for PPG
+    Only has an obs and the target value (return)
+    Stored in `B` in paper
+    """
+
+    # Raw pixel observation for this frame
+    agent_obs: dict
+    v_targ: float
+    done: bool
+
 class MemoryDataset(Dataset):
     """
     This is a dataset of memory objects (potentially multiple episodes!)
