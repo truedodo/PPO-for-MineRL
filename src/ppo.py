@@ -461,7 +461,6 @@ class ProximalPolicyOptimizer:
                                  (v_prediction - v_old).clamp(-self.value_clip, self.value_clip)).to(device)
 
                 # TODO what is this?
-
                 value_loss_1 = (value_clipped.squeeze() - returns) ** 2
                 value_loss_2 = (v_prediction.squeeze() - returns) ** 2
 
@@ -472,9 +471,6 @@ class ProximalPolicyOptimizer:
 
                 self.optim.zero_grad()
                 loss.backward()
-
-                # th.nn.utils.clip_grad_norm_(
-                #     self.trainable_parameters, MAX_GRAD_NORM)
                 self.optim.step()
 
                 # Update tensorboard with metrics
