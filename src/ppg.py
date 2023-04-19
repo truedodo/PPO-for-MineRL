@@ -29,7 +29,7 @@ from lib.tree_util import tree_map  # nopep8
 device = th.device("cuda:0" if th.cuda.is_available() else "cpu")
 # device = th.device("mps")  # apple silicon
 
-TRAIN_WHOLE_MODEL = True
+# TRAIN_WHOLE_MODEL = True
 
 
 class PhasicPolicyGradient:
@@ -439,8 +439,9 @@ class PhasicPolicyGradient:
             # As a result, the model is run and updated l times during training, hence this for loop
             for i in range(self.l):
 
-                # Need to collect all subtrajectories in a list
-                subtrajectories: List[Memory] = []
+                # Need to collect all the current memories in one list
+                # This contains the i-th memory from each subtrajectory
+                current_memories: List[Memory] = []
 
                 for n in range(self.num_envs):
                     # Get the indices of the current memory in each subtrajectory
@@ -448,7 +449,10 @@ class PhasicPolicyGradient:
                     idxs = np.arange(i, self.T, self.l)
                     mems = memories_arr[n][idxs]
 
-                    subtrajectories.extend(mems)
+                    current_memories.extend(mems)
+
+                assert len(current_memories) == self.num_envs * (self.T //
+                                                                 self.l), f"Got {len(data)} data points but expected {self.num_envs * (self.T // self.l)}"
 
                 # Create dataloader so we can concatenate our subtrajectories into one input for the model
                 data = MemoryDataset(self.memories)
@@ -456,8 +460,41 @@ class PhasicPolicyGradient:
                 dl = DataLoader(
                     data, batch_size=len(data), shuffle=False)
 
-                # Since we are running over the entire dataset, there is only one batch
-                x = next(iter(dl))
+                # We only get one batch containing step i from all subtrajectories
+                agent_obss, hidden_states, _, _, actions, action_log_probs, rewards, _, dones, values = next(
+                    iter(dl))
+
+                if i != 0:
+                    # In the 1st subtrajectory, we want the hidden_states from rollout
+                    # So we just do the old thing of fixing dimensions from the dataloader
+                    for i in range(len(hidden_states)):
+                        hidden_states[i][0] = hidden_states[i][0].squeeze(1)
+                        hidden_states[i][1][0] = hidden_states[i][1][0].squeeze(
+                            1)
+                        hidden_states[i][1][1] = hidden_states[i][1][1].squeeze(
+                            1)
+
+                else:
+                    # Otherwise, we want to ignore the hidden_states from rollout
+                    # Instead, we use the calculated state from the previous step
+                    # Apparently, reconstructing the hidden_states during training is important
+                    # See bible: https://iclr-blog-track.github.io/2022/03/25/ppo-implementation-details/
+                    hidden_states = next_hidden_states
+
+                # Fix the dimensions that get skewed by the dataloader
+                agent_obs = tree_map(lambda x: x.squeeze(1), agent_obs)
+
+                # Create dummy firsts tensor
+                dummy_firsts = th.from_numpy(np.full(
+                    (len(current_memories), 1), False)).to(device)
+
+                # Run the base model!
+                (pi_h, v_h), next_hidden_states = self.agent.policy.net(
+                    agent_obss, hidden_states, dummy_firsts
+                )
+                # Run the agent heads as well
+                pi_distribution = self.agent.policy.pi_head(pi_h)
+                v_prediction = self.agent.policy.value_head(v_h).to(device)
 
             # For training the recurrent model, we do batches of *sequences*
             # that is why this is `self.num_envs` and not `self.num_envs * self.num_timesteps`

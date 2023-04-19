@@ -8,6 +8,7 @@ out/*
 
 logs/
 runs/
+data/
 
 .DS_Store
 
