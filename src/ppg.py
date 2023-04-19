@@ -29,7 +29,7 @@ from lib.tree_util import tree_map  # nopep8
 device = th.device("cuda:0" if th.cuda.is_available() else "cpu")
 # device = th.device("mps")  # apple silicon
 
-TRAIN_WHOLE_MODEL = False
+TRAIN_WHOLE_MODEL = True
 
 
 class PhasicPolicyGradient:
@@ -44,9 +44,25 @@ class PhasicPolicyGradient:
 
             # Hyperparameters
             num_rollouts: int,
-            num_steps: int,  # the number of steps per rollout, T
-            epochs: int,
-            minibatch_size: int,
+
+            # The number of steps per rollout
+            T: int,
+
+            # The length of subtrajectories used in training
+            # Should satisfy these constraints:
+            # 0 < l <= T
+            # T % l == 0    this might actually not be necessary at all; todo: reevaluate
+            l: int,
+
+
+            # Number of epochs for the wake/policy phase
+            # Note: this should always be 1!
+            wake_epochs: int,
+
+            # Number of epochs for the sleep/auxiliary phase
+            sleep_epochs: int,
+
+            # minibatch_size: int,
             lr: float,
             weight_decay: float,
             betas: tuple,
@@ -59,8 +75,7 @@ class PhasicPolicyGradient:
             beta_klp: float,
 
 
-            mem_buffer_size: int,
-            sleep_cycles: int,
+            # mem_buffer_size: int,
             beta_clone: float,
 
             # Optional: plot stuff
@@ -81,9 +96,11 @@ class PhasicPolicyGradient:
 
         # Load hyperparameters unchanged
         self.num_rollouts = num_rollouts
-        self.num_steps = num_steps
-        self.epochs = epochs
-        self.minibatch_size = minibatch_size
+        self.T = T
+        self.l = l
+        self.wake_epochs = wake_epochs
+        self.sleep_epochs = sleep_epochs
+        # self.minibatch_size = minibatch_size
         self.lr = lr
         self.weight_decay = weight_decay
         self.betas = betas
@@ -94,12 +111,11 @@ class PhasicPolicyGradient:
         self.gamma = gamma
         self.lam = lam
         self.beta_klp = beta_klp
-        self.sleep_cycles = sleep_cycles
         self.beta_clone = beta_clone
 
         self.plot = plot
 
-        self.mem_buffer_size = mem_buffer_size
+        # self.mem_buffer_size = mem_buffer_size
 
         if self.plot:
             # These statistics are calculated live during the episode running (rollout)
@@ -119,23 +135,23 @@ class PhasicPolicyGradient:
                                  pi_head_kwargs=pi_head_kwargs)
         self.agent.load_weights(weights_path)
 
-        actor = self.agent.policy
-        policy_params = actor.parameters()
+        # Set up the optimizer and learning rate scheduler for the agent
+        agent_params = self.agent.policy.parameters()
 
-        self.optim = th.optim.Adam(
-            policy_params, lr=lr, betas=betas, weight_decay=weight_decay)
+        self.agent_optim = th.optim.Adam(
+            agent_params, lr=lr, betas=betas, weight_decay=weight_decay)
 
-        self.scheduler = th.optim.lr_scheduler.LambdaLR(
-            self.optim, lambda x: 1 - x / num_rollouts)
+        self.agent_scheduler = th.optim.lr_scheduler.LambdaLR(
+            self.agent_optim, lambda x: 1 - x / num_rollouts)
 
         # Create a SEPARATE VPT agent just for the critic
         self.critic = MineRLAgent(self.envs, policy_kwargs=policy_kwargs,
                                   pi_head_kwargs=pi_head_kwargs)
         self.critic.load_weights(weights_path)
-        critic_params = list(self.critic.policy.value_head.parameters(
-        )) + list(self.critic.policy.net.parameters())
 
-        # separate optimizer for the critic
+        # Separate optimizer for the critic
+        critic_params = self.critic.policy.parameters()
+
         self.critic_optim = th.optim.Adam(
             critic_params, lr=lr, betas=betas, weight_decay=weight_decay)
 
@@ -262,7 +278,7 @@ class PhasicPolicyGradient:
             self.live_value_history.clear()
             self.live_gae_history.clear()
 
-        for _ in range(self.num_steps):
+        for _ in range(self.T):
             obs = next_obs
             done = next_done
             policy_hidden_state = next_policy_hidden_state
@@ -308,8 +324,20 @@ class PhasicPolicyGradient:
 
             # Important! When we store a memory, we want the hidden state at the time of the observation as input! Not the step after
             # This is because we need to fully recreate the input when training the LSTM part of the network
-            memory = Memory(agent_obs, 0, 0, 0, action, action_log_prob,
-                            reward, 0, next_done, v_prediction)
+            # memory = Memory(agent_obs, 0, 0, 0, action, action_log_prob,
+            #                 reward, 0, next_done, v_prediction)
+            memory = Memory(
+                agent_obs=agent_obs,
+                hidden_state=policy_hidden_state,
+                pi_h=None,
+                v_h=None,
+                action=action,
+                action_log_prob=action_log_prob,
+                reward=reward,
+                total_reward=env._cum_reward,
+                done=next_done,
+                value=v_prediction
+            )
 
             rollout_memories.append(memory)
 
@@ -392,11 +420,44 @@ class PhasicPolicyGradient:
 
     def learn_ppo_phase(self, policy_hidden_states, critic_hidden_states):
 
-        # For simplicity
-        assert self.num_envs % self.minibatch_size == 0
+        # Check that we have consistent trajectory lengths
+        for mem in self.memories:
+            assert len(
+                mem) == self.T, f"Got {len(mem)} memories but expected {self.T}"
+
         memories_arr = np.array(self.memories)
 
-        for _ in tqdm(range(self.epochs), desc="🧠 Policy Epochs"):
+        for _ in tqdm(range(self.wake_epochs), desc="🧠 Policy Epochs"):
+            print(memories_arr.shape)
+
+            # During training, the model reconstructs a hidden state for subtrajectories of length l
+            # We have num_envs * T memories
+            # We divide these into num_envs * (T // l) subtrajectories
+            # Each time we run the model, we are stepping through each subtrajectory in parallel
+            # (technically we aren't exactly running it in parallel, but the calculation is independent)
+            # This allows us to run the model on num_envs * (T // l) inputs at once, rather than one at a time
+            # As a result, the model is run and updated l times during training, hence this for loop
+            for i in range(self.l):
+
+                # Need to collect all subtrajectories in a list
+                subtrajectories: List[Memory] = []
+
+                for n in range(self.num_envs):
+                    # Get the indices of the current memory in each subtrajectory
+                    # For i == 0, l == 3, this is [0, 3, 6, 9, ... T]
+                    idxs = np.arange(i, self.T, self.l)
+                    mems = memories_arr[n][idxs]
+
+                    subtrajectories.extend(mems)
+
+                # Create dataloader so we can concatenate our subtrajectories into one input for the model
+                data = MemoryDataset(self.memories)
+
+                dl = DataLoader(
+                    data, batch_size=len(data), shuffle=False)
+
+                # Since we are running over the entire dataset, there is only one batch
+                x = next(iter(dl))
 
             # For training the recurrent model, we do batches of *sequences*
             # that is why this is `self.num_envs` and not `self.num_envs * self.num_timesteps`
@@ -543,9 +604,9 @@ class PhasicPolicyGradient:
                 value_loss = torch.cat(value_losses).mean()
 
                 # Backprop for policy
-                self.optim.zero_grad()
+                self.agent_optim.zero_grad()
                 policy_loss.backward()
-                self.optim.step()
+                self.agent_optim.step()
 
                 # Backprop for critic
                 self.critic_optim.zero_grad()
@@ -568,7 +629,7 @@ class PhasicPolicyGradient:
                 self.num_wake_updates += 1
         # Update learning rate
         # TODO how to handle this in the aux phase?
-        self.scheduler.step()
+        self.agent_scheduler.step()
         self.scheduler_critic.step()
 
     def calculate_policy_priors(self, policy_hidden_states, critic_hidden_states):
@@ -616,7 +677,7 @@ class PhasicPolicyGradient:
         aux_arr = np.array(self.aux_memories)
         # TODO plot for this phase too !!
 
-        for _ in tqdm(range(self.sleep_cycles), desc="😴 Auxiliary Epochs"):
+        for _ in tqdm(range(self.sleep_epochs), desc="😴 Auxiliary Epochs"):
 
             # For training the recurrent model, we do batches of *sequences*
             # that is why this is `self.num_envs` and not `self.num_envs * self.num_timesteps`
@@ -707,9 +768,9 @@ class PhasicPolicyGradient:
                 value_loss = torch.cat(value_losses).mean()
 
                 # optimize Ljoint wrt policy weights
-                self.optim.zero_grad()
+                self.agent_optim.zero_grad()
                 joint_loss.backward()
-                self.optim.step()
+                self.agent_optim.step()
 
                 # optimize Lvalue wrt value weights
                 self.critic_optim.zero_grad()
@@ -796,11 +857,12 @@ if __name__ == "__main__":
         weights="foundation-model-1x",
         out_weights="cow-deleter-ppo-2ent-1x",
         save_every=5,
-        num_envs=4,
+        num_envs=2,
         num_rollouts=500,
-        num_steps=50,
-        epochs=1,
-        minibatch_size=1,
+        T=50,
+        l=5,
+        wake_epochs=1,
+        sleep_epochs=4,
         lr=2.5e-5,
         weight_decay=0,
         betas=(0.9, 0.999),
@@ -811,9 +873,8 @@ if __name__ == "__main__":
         gamma=0.99,
         lam=0.95,
         beta_klp=1,
-        sleep_cycles=2,
+
         beta_clone=1,
-        mem_buffer_size=10000,
         plot=True,
     )
 
