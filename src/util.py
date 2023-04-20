@@ -2,6 +2,7 @@
 
 import gym
 import torch as th
+import numpy as np
 
 device = th.device("cuda:0" if th.cuda.is_available() else "cpu")
 
@@ -53,6 +54,13 @@ def calculate_gae(rewards: list, values: list, masks: list, gamma: float, lam: f
         returns.insert(0, gae + values[step])
 
     return returns
+
+
+def fix_initial_hidden_states(hidden_states):
+    for i in range(len(hidden_states)):
+        hidden_states[i] = list(hidden_states[i])
+        hidden_states[i][0] = th.from_numpy(np.full(
+            (1, 1, 128), False)).to(device)
 
 
 def detach_hidden_states(hidden_states):

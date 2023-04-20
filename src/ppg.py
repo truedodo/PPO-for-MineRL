@@ -16,7 +16,7 @@ from torch.utils.tensorboard import SummaryWriter
 from datetime import datetime
 from tqdm import tqdm
 from memory import Memory, MemoryDataset, AuxMemory
-from util import detach_hidden_states, squeeze_hidden_states, to_torch_tensor, normalize, safe_reset, hard_reset, calculate_gae
+from util import detach_hidden_states, fix_initial_hidden_states, squeeze_hidden_states, to_torch_tensor, normalize, safe_reset, hard_reset, calculate_gae
 from vectorized_minerl import *
 
 sys.path.insert(0, "vpt")  # nopep8
@@ -258,16 +258,8 @@ class PhasicPolicyGradient:
             next_policy_hidden_state = self.agent.policy.initial_state(1)
             next_critic_hidden_state = self.critic.policy.initial_state(1)
 
-            # Fix the first boolean tensor so the dataloader doesn't get upset
-            for i in range(len(next_policy_hidden_state)):
-                next_policy_hidden_state[i] = list(next_policy_hidden_state[i])
-                next_policy_hidden_state[i][0] = th.from_numpy(np.full(
-                    (1, 1, 128), False)).to(device)
-
-            for i in range(len(next_critic_hidden_state)):
-                next_critic_hidden_state[i] = list(next_critic_hidden_state[i])
-                next_critic_hidden_state[i][0] = th.from_numpy(np.full(
-                    (1, 1, 128), False)).to(device)
+            fix_initial_hidden_states(next_policy_hidden_state)
+            fix_initial_hidden_states(next_critic_hidden_state)
 
             if hard_reset:
                 env.close()
@@ -308,6 +300,9 @@ class PhasicPolicyGradient:
                 env._cum_reward = 0
                 policy_hidden_state = self.agent.policy.initial_state(1)
                 critic_hidden_state = self.critic.policy.initial_state(1)
+
+                fix_initial_hidden_states(policy_hidden_state)
+                fix_initial_hidden_states(critic_hidden_state)
 
             # Preprocess image
             agent_obs = self.agent._env_obs_to_agent(obs)
