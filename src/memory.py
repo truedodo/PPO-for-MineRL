@@ -14,7 +14,8 @@ class Memory:
 
     # Raw pixel observation for this frame
     agent_obs: dict
-    hidden_state: list
+    policy_hidden_state: list
+    critic_hidden_state: list
     pi_h: th.tensor
     v_h: th.tensor
     action: np.ndarray
@@ -38,6 +39,7 @@ class AuxMemory:
     v_targ: float
     done: bool
 
+
 class MemoryDataset(Dataset):
     """
     This is a dataset of memory objects (potentially multiple episodes!)
@@ -54,7 +56,7 @@ class MemoryDataset(Dataset):
         mem = self.memories[idx]
 
         # This needs to be returned as a tuple
-        return mem.agent_obs, mem.hidden_state, mem.pi_h, mem.v_h, mem.action, mem.action_log_prob, mem.reward, mem.total_reward, mem.done, mem.value
+        return mem.agent_obs, mem.policy_hidden_state, mem.critic_hidden_state, mem.pi_h, mem.v_h, mem.action, mem.action_log_prob, mem.reward, mem.total_reward, mem.done, mem.value
 
 
 # This is probably not needed, but might as well define this type so we have it

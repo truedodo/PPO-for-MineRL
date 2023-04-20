@@ -428,8 +428,6 @@ class ProximalPolicyOptimizer:
                 # returns = th.tensor(rewards).float().to(device)
 
                 # Calculate the explained variance, to see how accurate the GAE really is...
-                # print(rewards.shape)
-                # print(v_prediction.shape)
                 explained_variance = 1 - \
                     th.sub(returns, v_prediction).var() / returns.var()
 
