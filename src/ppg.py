@@ -30,6 +30,7 @@ device = th.device("cuda:0" if th.cuda.is_available() else "cpu")
 # device = th.device("mps")  # apple silicon
 
 # TRAIN_WHOLE_MODEL = True
+MAX_GRAD_NORM = 5.
 
 
 class PhasicPolicyGradient:
@@ -537,8 +538,8 @@ class PhasicPolicyGradient:
                     pi_distribution, actions)
 
                 # The returns are stored in the `reward` field in memory, for some reason
-                # returns = normalize(rewards).to(device)
-                returns = rewards.to(device)
+                returns = normalize(rewards).to(device)
+                # returns = rewards.to(device)
 
                 # Calculate the explained variance, to see how accurate the GAE really is...
                 explained_variance = 1 - \
@@ -573,14 +574,23 @@ class PhasicPolicyGradient:
                 # Previously, we removed the clipped value loss function
                 # Although, I think intuitively it helps you stay closer to your prev value predictions
                 # And since our value predictions are so bad, it might help
-                value_loss = th.mean(th.max(value_loss_1, value_loss_2))
+                # value_loss = th.mean(th.max(value_loss_1, value_loss_2))
 
+                value_loss = value_loss_2.mean()
                 # Backprop for policy
+
+                th.nn.utils.clip_grad_norm_(
+                    self.agent.policy.parameters(), MAX_GRAD_NORM)
+
                 self.agent_optim.zero_grad()
                 policy_loss.mean().backward()
                 self.agent_optim.step()
 
                 # Backprop for critic
+
+                th.nn.utils.clip_grad_norm_(
+                    self.critic.policy.parameters(), MAX_GRAD_NORM)
+
                 self.critic_optim.zero_grad()
                 value_loss.mean().backward()
                 self.critic_optim.step()
@@ -738,8 +748,8 @@ class PhasicPolicyGradient:
                     v_aux_h).to(device)
 
                 # Normalize returns again
-                # returns = normalize(rewards).to(device)
-                returns = rewards.to(device)
+                returns = normalize(rewards).to(device)
+                # returns = rewards.to(device)
 
                 # Run the critic to get the main value prediction
                 (_, v_h), next_critic_hidden_states = self.critic.policy.net(
@@ -757,10 +767,16 @@ class PhasicPolicyGradient:
                 # Calculate unclipped value loss
                 value_loss = 0.5 * (v_prediction - returns.detach()) ** 2
 
+                th.nn.utils.clip_grad_norm_(
+                    self.agent.policy.parameters(), MAX_GRAD_NORM)
+
                 # Optimize Ljoint wrt policy weights
                 self.agent_optim.zero_grad()
                 joint_loss.mean().backward()
                 self.agent_optim.step()
+
+                th.nn.utils.clip_grad_norm_(
+                    self.critic.policy.parameters(), MAX_GRAD_NORM)
 
                 # Optimize Lvalue wrt value weights
                 self.critic_optim.zero_grad()
@@ -834,7 +850,7 @@ class PhasicPolicyGradient:
 
                 if not actually_got_a_fucking_reward:
                     print(
-                        "🔁  No rewards collected during this rollout! Clearing and retrying")
+                        "🔁 No rewards collected during this rollout! Clearing memories and starting new rollout")
                     self.memories.clear()
 
             # Need to give initial states from this rollout to re-rollout in learning with LSTM model
