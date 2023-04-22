@@ -73,7 +73,7 @@ class PhasicPolicyGradient:
             beta_s: float,
             eps_clip: float,
             value_clip: float,
-            value_loss_weight: float,
+            # value_loss_weight: float,
             gamma: float,
             lam: float,
             beta_klp: float,
@@ -113,7 +113,7 @@ class PhasicPolicyGradient:
         self.beta_s = beta_s
         self.eps_clip = eps_clip
         self.value_clip = value_clip
-        self.value_loss_weight = value_loss_weight
+        # self.value_loss_weight = value_loss_weight
         self.gamma = gamma
         self.lam = lam
         self.beta_klp = beta_klp
@@ -329,7 +329,7 @@ class PhasicPolicyGradient:
             env._cum_reward += reward  # Keep track of the episodic reawrd
             rollout_reward += reward
 
-            if done:
+            if next_done:
                 self.num_episodes_finished += 1
                 self.tb_writer.add_scalar(
                     "Episodic Reward", env._cum_reward, self.num_episodes_finished)
@@ -479,7 +479,7 @@ class PhasicPolicyGradient:
                     data, batch_size=len(data), shuffle=False)
 
                 # We only get one batch containing step i from all subtrajectories
-                agent_obss, policy_hidden_states, critic_hidden_states, _, _, actions, old_action_log_probs, rewards, _, dones, values = next(
+                agent_obss, policy_hidden_states, critic_hidden_states, _, _, actions, old_action_log_probs, rewards, _, dones, v_old = next(
                     iter(dl))
 
                 if i == 0:
@@ -506,15 +506,13 @@ class PhasicPolicyGradient:
                 # print(agent_obss["img"].requires_grad)
 
                 # Create dummy firsts tensors
-                policy_dummy_firsts = th.from_numpy(np.full(
-                    (len(current_memories), 1), False)).to(device)
-                critic_dummy_firsts = th.from_numpy(np.full(
+                dummy_firsts = th.from_numpy(np.full(
                     (len(current_memories), 1), False)).to(device)
 
                 # print(policy_hidden_states)
                 # Run the agent to get the policy distribution
                 (pi_h, _), next_policy_hidden_states = self.agent.policy.net(
-                    agent_obss, policy_hidden_states, context={"first": policy_dummy_firsts})
+                    agent_obss, policy_hidden_states, context={"first": dummy_firsts})
 
                 pi_distribution = self.agent.policy.pi_head(pi_h)
 
@@ -530,7 +528,7 @@ class PhasicPolicyGradient:
 
                 # Run the disjoint value network
                 (_, v_h), next_critic_hidden_states = self.critic.policy.net(
-                    agent_obss, critic_hidden_states, context={"first": critic_dummy_firsts})
+                    agent_obss, critic_hidden_states, context={"first": dummy_firsts})
 
                 v_prediction = self.critic.policy.value_head(v_h).to(device)
 
@@ -539,7 +537,8 @@ class PhasicPolicyGradient:
                     pi_distribution, actions)
 
                 # The returns are stored in the `reward` field in memory, for some reason
-                returns = normalize(rewards).to(device)
+                # returns = normalize(rewards).to(device)
+                returns = rewards.to(device)
 
                 # Calculate the explained variance, to see how accurate the GAE really is...
                 explained_variance = 1 - \
@@ -562,12 +561,19 @@ class PhasicPolicyGradient:
                     th.min(surr1, surr2) - self.beta_s * \
                     entropy - self.beta_klp * kl_div
 
-                # Calculate unclipped value loss
-                value_loss = 0.5 * (v_prediction.squeeze() - returns) ** 2
+                # Calculate clipped value loss
+                value_clipped = (v_old +
+                                 (v_prediction - v_old).clamp(-self.value_clip, self.value_clip)).to(device)
+                value_loss_1 = (value_clipped.squeeze() - returns) ** 2
 
-                # We need to retain compute graph throughout this
-                # Last step doesn't matter, though
-                should_retain_graph = False  # i != self.l-1
+                # Calculate unclipped value loss
+                value_loss_2 = (v_prediction.squeeze() - returns) ** 2
+
+                # Our actual value loss
+                # Previously, we removed the clipped value loss function
+                # Although, I think intuitively it helps you stay closer to your prev value predictions
+                # And since our value predictions are so bad, it might help
+                value_loss = th.mean(th.max(value_loss_1, value_loss_2))
 
                 # Backprop for policy
                 self.agent_optim.zero_grad()
@@ -581,20 +587,20 @@ class PhasicPolicyGradient:
 
                 # Update tensorboard with metrics
                 self.tb_writer.add_scalar(
-                    "Loss/Wake/Policy", policy_loss.mean().item(), self.num_wake_updates)
+                    "Wake Loss/Policy", policy_loss.mean().item(), self.num_wake_updates)
                 self.tb_writer.add_scalar(
-                    "Loss/Wake/Value", value_loss.mean().item(), self.num_wake_updates)
+                    "Wake Loss/Value", value_loss.mean().item(), self.num_wake_updates)
 
                 self.tb_writer.add_scalar(
-                    "Stats/Wake/Entropy", entropy.mean().item(), self.num_wake_updates)
+                    "Wake Stats/Entropy", entropy.mean().item(), self.num_wake_updates)
                 self.tb_writer.add_scalar(
-                    "Stats/Wake/KL Divergence from ORIGINAL", kl_div.mean().item(), self.num_wake_updates)
+                    "Wake Stats/KL Divergence from ORIGINAL", kl_div.mean().item(), self.num_wake_updates)
                 self.tb_writer.add_scalar(
-                    "Stats/Wake/Explained Variance", explained_variance.item(), self.num_wake_updates)
+                    "Wake Stats/Explained Variance", explained_variance.item(), self.num_wake_updates)
 
                 self.num_wake_updates += 1
-        self.agent_scheduler.step()
-        self.critic_scheduler.step()
+        # self.agent_scheduler.step()
+        # self.critic_scheduler.step()
 
     def calculate_policy_priors(self):
         '''
@@ -670,7 +676,7 @@ class PhasicPolicyGradient:
             pi_dists) == self.l, f"Expected {self.l} policy priors, got {len(pi_dists)}"
         return pi_dists
 
-    def auxiliary_phase(self, pi_priors):
+    def learn_aux_phase(self, pi_priors):
         '''
         Run the auxiliary training phase for the value and aux value functions
         '''
@@ -681,7 +687,7 @@ class PhasicPolicyGradient:
 
         for _ in tqdm(range(self.sleep_epochs), desc="😴 Auxiliary Epochs"):
             # Do the same batching procedure as in the wake phase
-            for i in range(self.l):
+            for i in tqdm(range(self.l), desc="🧠 Auxiliary Updates", leave=False):
                 current_memories: List[Memory] = []
                 for n in range(self.num_envs):
                     # Get the indices of the current memory in each subtrajectory
@@ -732,7 +738,8 @@ class PhasicPolicyGradient:
                     v_aux_h).to(device)
 
                 # Normalize returns again
-                returns = normalize(rewards).to(device)
+                # returns = normalize(rewards).to(device)
+                returns = rewards.to(device)
 
                 # Run the critic to get the main value prediction
                 (_, v_h), next_critic_hidden_states = self.critic.policy.net(
@@ -761,10 +768,13 @@ class PhasicPolicyGradient:
                 self.critic_optim.step()
 
                 self.tb_writer.add_scalar(
-                    "Loss/Sleep/Value (Joint)", joint_loss.mean().item(), self.num_sleep_updates)
+                    "Sleep Loss/Value (Joint)", joint_loss.mean().item(), self.num_sleep_updates)
 
                 self.tb_writer.add_scalar(
-                    "Loss/Sleep/Value (Critic)", value_loss.mean().item(), self.num_sleep_updates)
+                    "Sleep Loss/Value (Critic)", value_loss.mean().item(), self.num_sleep_updates)
+
+                self.tb_writer.add_scalar(
+                    "Sleep Stats/KL Term", kl_term.mean().item(), self.num_sleep_updates)
 
                 self.num_sleep_updates += 1
 
@@ -800,14 +810,32 @@ class PhasicPolicyGradient:
             dones_buffer = []
             policy_states_buffer = []
             critic_states_buffer = []
-            for env, next_obs, next_done, next_policy_hidden_state, next_critic_hidden_state \
-                    in zip(self.envs, obss, dones, policy_states, critic_states):
-                next_obs, next_done, next_policy_hidden_state, next_critic_hidden_state = self.rollout(
-                    env, next_obs, next_done, next_policy_hidden_state, next_critic_hidden_state, hard_reset=should_hard_reset)
-                obss_buffer.append(next_obs)
-                dones_buffer.append(next_done)
-                policy_states_buffer.append(next_policy_hidden_state)
-                critic_states_buffer.append(next_critic_hidden_state)
+
+            # Run rollout until a reward is achieved in at least one environment
+            actually_got_a_fucking_reward = False
+
+            while not actually_got_a_fucking_reward:
+                for env, next_obs, next_done, next_policy_hidden_state, next_critic_hidden_state \
+                        in zip(self.envs, obss, dones, policy_states, critic_states):
+                    next_obs, next_done, next_policy_hidden_state, next_critic_hidden_state = self.rollout(
+                        env, next_obs, next_done, next_policy_hidden_state, next_critic_hidden_state, hard_reset=should_hard_reset)
+                    obss_buffer.append(next_obs)
+                    dones_buffer.append(next_done)
+                    policy_states_buffer.append(next_policy_hidden_state)
+                    critic_states_buffer.append(next_critic_hidden_state)
+
+                # Check the rewards
+                for traj in self.memories:
+                    assert len(traj) == self.T
+                    # Assuming our default reward is -1 per step
+                    # Should generalize this; not gonna
+                    if traj[0].total_reward != -self.T:
+                        actually_got_a_fucking_reward = True
+
+                if not actually_got_a_fucking_reward:
+                    print(
+                        "🔁  No rewards collected during this rollout! Clearing and retrying")
+                    self.memories.clear()
 
             # Need to give initial states from this rollout to re-rollout in learning with LSTM model
             self.learn_policy_phase()
@@ -818,21 +846,24 @@ class PhasicPolicyGradient:
             # NOW, we clear the memories so that we don't retrain on old data in the next wake phase
             self.memories.clear()
 
+            # Every N_pi wake phases, we do an auxiliary phase
             if (i+1) % self.num_wake_cycles == 0:
-                # Here, we do a sleep cycle
+                # Get pi predictions using current weights
                 pi_priors = self.calculate_policy_priors()
 
-                self.auxiliary_phase(pi_priors)
+                self.learn_aux_phase(pi_priors)
 
                 self.aux_memories.clear()
-
-                # self.aux_memories.clear()
 
             # Update from buffers AFTER learning...
             obss = obss_buffer
             dones = dones_buffer
             policy_states = policy_states_buffer
             critic_states = critic_states_buffer
+
+            # Do learning rate annealing here so that it's more consistent i guess...
+            self.agent_scheduler.step()
+            self.critic_scheduler.step()
 
 
 if __name__ == "__main__":
@@ -847,16 +878,16 @@ if __name__ == "__main__":
         num_iterations=500,
         num_wake_cycles=2,
         T=50,
-        l=5,
+        l=10,
         wake_epochs=1,
         sleep_epochs=4,
-        lr=2.5e-4,
-        weight_decay=0,
+        lr=1e-5,
+        weight_decay=1e-2,
         betas=(0.9, 0.999),
         beta_s=0,  # no entropy in fine tuning!
         eps_clip=0.2,
         value_clip=0.2,
-        value_loss_weight=0.2,
+        # value_loss_weight=0.2,
         gamma=0.99,
         lam=0.95,
         beta_klp=1,
