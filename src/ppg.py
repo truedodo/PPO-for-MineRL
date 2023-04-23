@@ -389,8 +389,8 @@ class PhasicPolicyGradient:
                     pi_distribution, v_prediction, next_policy_hidden_state, next_critic_hidden_state \
                         = self.pi_and_v(agent_obs, policy_hidden_state, critic_hidden_state, dummy_first)
 
-                    (_, _), next_orig_hidden_state = self.orig_agent.policy.net(
-                        agent_obs, orig_hidden_state, context={"first": dummy_first})
+                    # (_, _), next_orig_hidden_state = self.orig_agent.policy.net(
+                    #     agent_obs, orig_hidden_state, context={"first": dummy_first})
 
                     returns = calculate_gae(
                         rewards, v_preds, masks, self.gamma, self.lam, v_prediction)
@@ -912,6 +912,7 @@ class PhasicPolicyGradient:
             dones = dones_buffer
             policy_states = policy_states_buffer
             critic_states = critic_states_buffer
+            orig_states = orig_states_buffer
 
             # Do learning rate annealing here so that it's more consistent i guess...
             self.agent_scheduler.step()
