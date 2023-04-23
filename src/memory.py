@@ -16,6 +16,7 @@ class Memory:
     agent_obs: dict
     policy_hidden_state: list
     critic_hidden_state: list
+    orig_pi_h: th.tensor
     pi_h: th.tensor
     v_h: th.tensor
     action: np.ndarray
@@ -56,7 +57,7 @@ class MemoryDataset(Dataset):
         mem = self.memories[idx]
 
         # This needs to be returned as a tuple
-        return mem.agent_obs, mem.policy_hidden_state, mem.critic_hidden_state, mem.pi_h, mem.v_h, mem.action, mem.action_log_prob, mem.reward, mem.total_reward, mem.done, mem.value
+        return mem.agent_obs, mem.policy_hidden_state, mem.critic_hidden_state, mem.orig_pi_h, mem.pi_h, mem.v_h, mem.action, mem.action_log_prob, mem.reward, mem.total_reward, mem.done, mem.value
 
 
 # This is probably not needed, but might as well define this type so we have it

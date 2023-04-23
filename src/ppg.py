@@ -169,7 +169,7 @@ class PhasicPolicyGradient:
         # This will be a relatively large chunk of data
         # Potential memory issues / optimizations around here...
         self.memories: List[List[Memory]] = []
-        self.aux_memories: List[List[AuxMemory]] = []
+        self.aux_memories: List[List[Memory]] = []
 
         # Initialize the ORIGINAL MODEL for a KL divergence term during the Policy Phase
         # We will use KL divergence between our policy predictions and the original policy
@@ -238,11 +238,11 @@ class PhasicPolicyGradient:
         self.live_value_plot, = self.live_ax.plot(
             [], [], color="blue", label="Value")
         self.live_gae_plot, = self.live_ax.plot(
-            [], [], color="green", label="GAE")
+            [], [], color="green", label="V_target")
 
         self.live_ax.legend(loc="upper right")
 
-    def rollout(self, env, next_obs=None, next_done=False, next_policy_hidden_state=None, next_critic_hidden_state=None, hard_reset: bool = False):
+    def rollout(self, env, next_obs=None, next_done=False, next_policy_hidden_state=None, next_critic_hidden_state=None, next_orig_hidden_state=None, hard_reset: bool = False):
         """
         Runs a rollout on the vectorized environments for `num_steps` timesteps and records the memories
 
@@ -258,9 +258,11 @@ class PhasicPolicyGradient:
             # Initialize the hidden state vector
             next_policy_hidden_state = self.agent.policy.initial_state(1)
             next_critic_hidden_state = self.critic.policy.initial_state(1)
+            next_orig_hidden_state = self.orig_agent.policy.initial_state(1)
 
             fix_initial_hidden_states(next_policy_hidden_state)
             fix_initial_hidden_states(next_critic_hidden_state)
+            fix_initial_hidden_states(next_orig_hidden_state)
 
             if hard_reset:
                 env.close()
@@ -293,6 +295,7 @@ class PhasicPolicyGradient:
             done = next_done
             policy_hidden_state = next_policy_hidden_state
             critic_hidden_state = next_critic_hidden_state
+            orig_hidden_state = next_orig_hidden_state
 
             # We have to do some resetting...
             if done:
@@ -301,9 +304,11 @@ class PhasicPolicyGradient:
                 env._cum_reward = 0
                 policy_hidden_state = self.agent.policy.initial_state(1)
                 critic_hidden_state = self.critic.policy.initial_state(1)
+                orig_hidden_state = self.orig_agent.policy.initial_state(1)
 
                 fix_initial_hidden_states(policy_hidden_state)
                 fix_initial_hidden_states(critic_hidden_state)
+                fix_initial_hidden_states(orig_hidden_state)
 
             # Preprocess image
             agent_obs = self.agent._env_obs_to_agent(obs)
@@ -312,8 +317,17 @@ class PhasicPolicyGradient:
             agent_obs = tree_map(lambda x: x.unsqueeze(1), agent_obs)
 
             with th.no_grad():
+                # Run the model to get the value and pi predictions
                 pi_distribution, v_prediction, next_policy_hidden_state, next_critic_hidden_state \
                     = self.pi_and_v(agent_obs, policy_hidden_state, critic_hidden_state, dummy_first)
+
+                # Run the original model to keep track of the hidden state
+                # We could also calculate the pi distribution here as well
+                # Although we would only run on batch size = 1
+                # By running it during the wake phase, we run on a bigger batch
+                # We only want to keep track of orig_pi_h, though
+                (orig_pi_h, _), next_orig_hidden_state = self.orig_agent.policy.net(
+                    agent_obs, orig_hidden_state, context={"first": dummy_first})
 
             action = self.agent.policy.pi_head.sample(
                 pi_distribution, deterministic=False)
@@ -343,6 +357,7 @@ class PhasicPolicyGradient:
                 agent_obs=agent_obs,
                 policy_hidden_state=policy_hidden_state,
                 critic_hidden_state=critic_hidden_state,
+                orig_pi_h=orig_pi_h,
                 pi_h=0,
                 v_h=0,
                 action=action,
@@ -373,9 +388,14 @@ class PhasicPolicyGradient:
                     agent_obs = tree_map(lambda x: x.unsqueeze(1), agent_obs)
                     pi_distribution, v_prediction, next_policy_hidden_state, next_critic_hidden_state \
                         = self.pi_and_v(agent_obs, policy_hidden_state, critic_hidden_state, dummy_first)
+
+                    (_, _), next_orig_hidden_state = self.orig_agent.policy.net(
+                        agent_obs, orig_hidden_state, context={"first": dummy_first})
+
                     returns = calculate_gae(
                         rewards, v_preds, masks, self.gamma, self.lam, v_prediction)
 
+                    # returns = normalize(to_torch_tensor(returns))
                     # Update data
                     self.live_reward_history.append(reward)
                     self.live_value_history.append(v_prediction.item())
@@ -411,12 +431,17 @@ class PhasicPolicyGradient:
             agent_obs = tree_map(lambda x: x.unsqueeze(1), agent_obs)
             pi_distribution, v_prediction, next_policy_hidden_state, next_critic_hidden_state \
                 = self.pi_and_v(agent_obs, policy_hidden_state, critic_hidden_state, dummy_first)
+
+            # Get the last hidden state from the original agent
+            (_, _), next_orig_hidden_state = self.orig_agent.policy.net(
+                agent_obs, orig_hidden_state, context={"first": dummy_first})
+
             returns = calculate_gae(
                 rewards, v_preds, masks, self.gamma, self.lam, v_prediction)
 
         # Make changes to the memories for this episode before adding them to main buffer
         for i in range(len(rollout_memories)):
-            # Replace raw reward with the GAE
+            # Replace raw reward with the returns for GAE
             rollout_memories[i].reward = returns[i]
 
             # Remember the total reward for this episode
@@ -431,7 +456,7 @@ class PhasicPolicyGradient:
         print(
             f"✅ Rollout finished (duration: {end - start} | memories: {len(rollout_memories)} | rollout reward: {rollout_reward})")
 
-        return next_obs, next_done, next_policy_hidden_state, next_critic_hidden_state
+        return next_obs, next_done, next_policy_hidden_state, next_critic_hidden_state, next_orig_hidden_state
 
     def learn_policy_phase(self):
 
@@ -480,7 +505,7 @@ class PhasicPolicyGradient:
                     data, batch_size=len(data), shuffle=False)
 
                 # We only get one batch containing step i from all subtrajectories
-                agent_obss, policy_hidden_states, critic_hidden_states, _, _, actions, old_action_log_probs, rewards, _, dones, v_old = next(
+                agent_obss, policy_hidden_states, critic_hidden_states, orig_pi_h, _, _, actions, old_action_log_probs, rewards, _, dones, v_old = next(
                     iter(dl))
 
                 if i == 0:
@@ -521,7 +546,8 @@ class PhasicPolicyGradient:
                 # Note: We should really be running the entire original VPT instead of just the pi_head
                 # Doing just the pi_head is cheaper, but not as useful
                 with th.no_grad():
-                    orig_pi_distribution = self.orig_agent.policy.pi_head(pi_h)
+                    orig_pi_distribution = self.orig_agent.policy.pi_head(
+                        orig_pi_h)
 
                 # Calculate KL divergence
                 kl_div = self.agent.policy.pi_head.kl_divergence(
@@ -532,6 +558,10 @@ class PhasicPolicyGradient:
                     agent_obss, critic_hidden_states, context={"first": dummy_firsts})
 
                 v_prediction = self.critic.policy.value_head(v_h).to(device)
+
+                # Normalize the value prediction, since we compare it with returns
+                v_prediction = self.critic.policy.value_head.normalize(
+                    v_prediction)
 
                 # Calculate the log probs of the actual actions wrt the new policy distribution
                 action_log_probs = self.agent.policy.get_logprob_of_action(
@@ -553,7 +583,7 @@ class PhasicPolicyGradient:
                 ratios = (action_log_probs -
                           old_action_log_probs).exp().to(device)
                 advantages = (returns.detach() -
-                              v_prediction.detach()).to(device)
+                              v_old.detach()).to(device)
                 surr1 = ratios * advantages
                 surr2 = ratios.clamp(
                     1 - self.eps_clip, 1 + self.eps_clip) * advantages
@@ -579,20 +609,18 @@ class PhasicPolicyGradient:
                 value_loss = value_loss_2.mean()
                 # Backprop for policy
 
-                th.nn.utils.clip_grad_norm_(
-                    self.agent.policy.parameters(), MAX_GRAD_NORM)
-
                 self.agent_optim.zero_grad()
                 policy_loss.mean().backward()
+                th.nn.utils.clip_grad_norm_(
+                    self.agent.policy.parameters(), MAX_GRAD_NORM)
                 self.agent_optim.step()
 
                 # Backprop for critic
 
-                th.nn.utils.clip_grad_norm_(
-                    self.critic.policy.parameters(), MAX_GRAD_NORM)
-
                 self.critic_optim.zero_grad()
                 value_loss.mean().backward()
+                th.nn.utils.clip_grad_norm_(
+                    self.critic.policy.parameters(), MAX_GRAD_NORM)
                 self.critic_optim.step()
 
                 # Update tensorboard with metrics
@@ -653,7 +681,7 @@ class PhasicPolicyGradient:
                 data, batch_size=len(data), shuffle=False)
 
             # We only get one batch containing step i from all subtrajectories
-            agent_obss, policy_hidden_states, critic_hidden_states, _, _, actions, old_action_log_probs, rewards, _, dones, values = next(
+            agent_obss, policy_hidden_states, critic_hidden_states, orig_pi_h, _, _, actions, old_action_log_probs, rewards, _, dones, values = next(
                 iter(dl))
 
             if i == 0:
@@ -713,7 +741,7 @@ class PhasicPolicyGradient:
                     data, batch_size=len(data), shuffle=False)
 
                 # We only get one batch containing step i from all subtrajectories
-                agent_obss, policy_hidden_states, critic_hidden_states, _, _, actions, old_action_log_probs, rewards, _, dones, values = next(
+                agent_obss, policy_hidden_states, critic_hidden_states, orig_pi_h, _, _, actions, old_action_log_probs, rewards, _, dones, values = next(
                     iter(dl))
 
                 if i == 0:
@@ -747,6 +775,10 @@ class PhasicPolicyGradient:
                 v_aux_prediction = self.agent.policy.value_head(
                     v_aux_h).to(device)
 
+                # Normalize the auxiliary value prediction
+                v_aux_prediction = self.agent.policy.value_head.normalize(
+                    v_aux_prediction)
+
                 # Normalize returns again
                 returns = normalize(rewards).to(device)
                 # returns = rewards.to(device)
@@ -756,6 +788,9 @@ class PhasicPolicyGradient:
                     agent_obss, critic_hidden_states, context={"first": dummy_firsts})
 
                 v_prediction = self.critic.policy.value_head(v_h).to(device)
+                # Normalize the main value prediciton
+                v_prediction = self.critic.policy.value_head.normalize(
+                    v_prediction)
 
                 aux_loss = .5 * (v_aux_prediction - returns.detach()) ** 2
 
@@ -767,20 +802,18 @@ class PhasicPolicyGradient:
                 # Calculate unclipped value loss
                 value_loss = 0.5 * (v_prediction - returns.detach()) ** 2
 
-                th.nn.utils.clip_grad_norm_(
-                    self.agent.policy.parameters(), MAX_GRAD_NORM)
-
                 # Optimize Ljoint wrt policy weights
                 self.agent_optim.zero_grad()
                 joint_loss.mean().backward()
-                self.agent_optim.step()
-
                 th.nn.utils.clip_grad_norm_(
-                    self.critic.policy.parameters(), MAX_GRAD_NORM)
+                    self.agent.policy.parameters(), MAX_GRAD_NORM)
+                self.agent_optim.step()
 
                 # Optimize Lvalue wrt value weights
                 self.critic_optim.zero_grad()
                 value_loss.mean().backward()
+                th.nn.utils.clip_grad_norm_(
+                    self.critic.policy.parameters(), MAX_GRAD_NORM)
                 self.critic_optim.step()
 
                 self.tb_writer.add_scalar(
@@ -805,6 +838,7 @@ class PhasicPolicyGradient:
         dones = [False]*self.num_envs
         policy_states = [None]*self.num_envs
         critic_states = [None]*self.num_envs
+        orig_states = [None]*self.num_envs
 
         for i in range(self.num_iterations):
 
@@ -826,19 +860,21 @@ class PhasicPolicyGradient:
             dones_buffer = []
             policy_states_buffer = []
             critic_states_buffer = []
+            orig_states_buffer = []
 
             # Run rollout until a reward is achieved in at least one environment
             actually_got_a_fucking_reward = False
 
             while not actually_got_a_fucking_reward:
-                for env, next_obs, next_done, next_policy_hidden_state, next_critic_hidden_state \
-                        in zip(self.envs, obss, dones, policy_states, critic_states):
-                    next_obs, next_done, next_policy_hidden_state, next_critic_hidden_state = self.rollout(
-                        env, next_obs, next_done, next_policy_hidden_state, next_critic_hidden_state, hard_reset=should_hard_reset)
+                for env, next_obs, next_done, next_policy_hidden_state, next_critic_hidden_state, next_orig_hidden_state \
+                        in zip(self.envs, obss, dones, policy_states, critic_states, orig_states):
+                    next_obs, next_done, next_policy_hidden_state, next_critic_hidden_state, next_orig_hidden_state = self.rollout(
+                        env, next_obs, next_done, next_policy_hidden_state, next_critic_hidden_state, next_orig_hidden_state, hard_reset=should_hard_reset)
                     obss_buffer.append(next_obs)
                     dones_buffer.append(next_done)
                     policy_states_buffer.append(next_policy_hidden_state)
                     critic_states_buffer.append(next_critic_hidden_state)
+                    orig_states_buffer.append(next_orig_hidden_state)
 
                 # Check the rewards
                 for traj in self.memories:
@@ -893,14 +929,14 @@ if __name__ == "__main__":
         num_envs=4,
         num_iterations=500,
         num_wake_cycles=2,
-        T=50,
-        l=10,
+        T=40,
+        l=4,
         wake_epochs=1,
         sleep_epochs=4,
         lr=1e-5,
         weight_decay=1e-2,
         betas=(0.9, 0.999),
-        beta_s=0,  # no entropy in fine tuning!
+        beta_s=0.4,  # no entropy in fine tuning!
         eps_clip=0.2,
         value_clip=0.2,
         # value_loss_weight=0.2,
