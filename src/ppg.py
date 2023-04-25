@@ -560,8 +560,8 @@ class PhasicPolicyGradient:
                 v_prediction = self.critic.policy.value_head(v_h).to(device)
 
                 # Normalize the value prediction, since we compare it with returns
-                v_prediction = self.critic.policy.value_head.normalize(
-                    v_prediction)
+                # v_prediction = self.critic.policy.value_head.normalize(
+                #     v_prediction)
 
                 # Calculate the log probs of the actual actions wrt the new policy distribution
                 action_log_probs = self.agent.policy.get_logprob_of_action(
@@ -606,7 +606,7 @@ class PhasicPolicyGradient:
                 # And since our value predictions are so bad, it might help
                 # value_loss = th.mean(th.max(value_loss_1, value_loss_2))
 
-                value_loss = value_loss_2.mean()
+                value_loss = value_loss_2
                 # Backprop for policy
 
                 self.agent_optim.zero_grad()
@@ -776,12 +776,12 @@ class PhasicPolicyGradient:
                     v_aux_h).to(device)
 
                 # Normalize the auxiliary value prediction
-                v_aux_prediction = self.agent.policy.value_head.normalize(
-                    v_aux_prediction)
+                # v_aux_prediction = self.agent.policy.value_head.normalize(
+                #     v_aux_prediction)
 
                 # Normalize returns again
-                returns = normalize(rewards).to(device)
-                # returns = rewards.to(device)
+                # returns = normalize(rewards).to(device)
+                returns = rewards.to(device)
 
                 # Run the critic to get the main value prediction
                 (_, v_h), next_critic_hidden_states = self.critic.policy.net(
@@ -789,8 +789,8 @@ class PhasicPolicyGradient:
 
                 v_prediction = self.critic.policy.value_head(v_h).to(device)
                 # Normalize the main value prediciton
-                v_prediction = self.critic.policy.value_head.normalize(
-                    v_prediction)
+                # v_prediction = self.critic.policy.value_head.normalize(
+                #     v_prediction)
 
                 aux_loss = .5 * (v_aux_prediction - returns.detach()) ** 2
 
@@ -929,9 +929,9 @@ if __name__ == "__main__":
         save_every=5,
         num_envs=4,
         num_iterations=500,
-        num_wake_cycles=2,
+        num_wake_cycles=4,
         T=40,
-        l=4,
+        l=5,
         wake_epochs=1,
         sleep_epochs=4,
         lr=1e-5,
@@ -941,8 +941,8 @@ if __name__ == "__main__":
         eps_clip=0.2,
         value_clip=0.2,
         # value_loss_weight=0.2,
-        gamma=0.99,
-        lam=0.95,
+        gamma=0.2,
+        lam=0.2,
         beta_klp=1,
 
         beta_clone=1,

@@ -274,8 +274,19 @@ class ProximalPolicyOptimizer:
 
             # Important! When we store a memory, we want the hidden state at the time of the observation as input! Not the step after
             # This is because we need to fully recreate the input when training the LSTM part of the network
-            memory = Memory(agent_obs, hidden_state, pi_h, v_h, action, action_log_prob,
-                            reward, 0, next_done, v_prediction)
+            memory = Memory(
+                agent_obs=agent_obs,
+                policy_hidden_state=hidden_state,
+                critic_hidden_state=0,
+                orig_pi_h=0,
+                pi_h=pi_h,
+                v_h=v_h,
+                action=action,
+                action_log_prob=action_log_prob,
+                reward=reward,
+                total_reward=0,
+                done=next_done,
+                value=v_prediction)
 
             rollout_memories.append(memory)
 
@@ -380,7 +391,7 @@ class ProximalPolicyOptimizer:
         for epoch in tqdm(range(self.epochs), desc="🧠 Epochs"):
 
             # Note: These are batches, not individual samples
-            for agent_obs, state, recorded_pi_h, recorded_v_h, actions, old_action_log_probs, rewards, total_rewards, dones, v_old in dl:
+            for agent_obs, state, _, _, recorded_pi_h, recorded_v_h, actions, old_action_log_probs, rewards, total_rewards, dones, v_old in dl:
                 batch_size = len(dones)
                 # print(agent_obs["img"].shape)
                 v_old = v_old.to(device)
@@ -605,10 +616,10 @@ class ProximalPolicyOptimizer:
 if __name__ == "__main__":
 
     ppo = ProximalPolicyOptimizer(
-        env_name="MineRLPunchCowEz-v0",
+        env_name="MineRLFightZombie-v0",
         model="foundation-model-1x",
         weights="foundation-model-1x",
-        out_weights="random-1x",
+        out_weights="ppo-zombie-hunter-1x",
         save_every=5,
         num_envs=4,
         num_rollouts=500,
@@ -616,7 +627,7 @@ if __name__ == "__main__":
         epochs=4,
         minibatch_size=48,
         lr=2.5e-5,
-        weight_decay=0,
+        weight_decay=0.01,
         betas=(0.9, 0.999),
         beta_s=0.2,
         rho=0.2,
