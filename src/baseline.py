@@ -57,13 +57,13 @@ def main(
     fig = plt.figure()
 
     hist_n, bins, patches = plt.hist(
-        [], bins=list(range(-200, 200, 10)), color="green", label="Episode Rewards")
+        [], bins=list(range(-200, 500, 10)), color="green", label="Episode Rewards")
 
     rewards = []
     killed = []
     damage = []
 
-    for eps in tqdm(range(n)):
+    for eps in range(n):
         # Hard reset every 10 episodes so we don't crash
         if eps % 10 == 0 and eps > 0:
             env.close()
@@ -78,7 +78,7 @@ def main(
             action = agent.get_action(obs)
             obs, reward, done, info = env.step(action)
             total_reward += reward
-            # env.render()
+            env.render()
 
         rewards.append(total_reward)
         killed.append(obs["mob_kills"]["mob_kills"] > 1)
@@ -88,6 +88,10 @@ def main(
         new_n, _ = np.histogram(rewards, bins=bins)
         for patch, new_value in zip(patches, new_n):
             patch.set_height(new_value)
+
+        print(f"Episode {eps+1}/{n} finished with reward {total_reward}")
+        print(f"- Currently mean={np.mean(rewards)}, stddev={np.std(rewards)}")
+        print()
 
         # Update the ylim to accommodate new data
         plt.ylim(0, np.max(new_n) * 1.1)

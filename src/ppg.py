@@ -922,16 +922,16 @@ class PhasicPolicyGradient:
 if __name__ == "__main__":
 
     ppg = PhasicPolicyGradient(
-        env_name="MineRLPunchCowEz-v0",
+        env_name="MineRLFightZombie-v0",
         model="foundation-model-1x",
         weights="foundation-model-1x",
-        out_weights="ppg-defeater-of-cows-1x",
+        out_weights="ppgp-zombie-hunter-1x",
         save_every=5,
         num_envs=4,
         num_iterations=500,
-        num_wake_cycles=4,
-        T=40,
-        l=5,
+        num_wake_cycles=2,
+        T=50,
+        l=10,
         wake_epochs=1,
         sleep_epochs=4,
         lr=1e-5,
@@ -943,7 +943,7 @@ if __name__ == "__main__":
         # value_loss_weight=0.2,
         gamma=0.2,
         lam=0.2,
-        beta_klp=1,
+        beta_klp=0.1,
 
         beta_clone=1,
         plot=True,
