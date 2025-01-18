@@ -1,3 +1,4 @@
+
 import pickle
 import sys
 import time
@@ -25,8 +26,8 @@ from lib.tree_util import tree_map  # nopep8
 
 # For debugging purposes
 # th.autograd.set_detect_anomaly(True)
-# device = th.device("mps" if th.backends.mps.is_available() else "cpu")
-device = th.device("mps")  # apple silicon
+device = th.device("cuda:0" if th.cuda.is_available() else "cpu")
+# device = th.device("mps")  # apple silicon
 
 TRAIN_WHOLE_MODEL = False
 
@@ -295,7 +296,7 @@ class ProximalPolicyOptimizer:
 
             if self.plot:
                 # Calculate the GAE up to this point
-                v_preds = list(map(lambda mem: mem.value.cpu().numpy(), rollout_memories))
+                v_preds = list(map(lambda mem: mem.value, rollout_memories))
                 rewards = list(map(lambda mem: mem.reward, rollout_memories))
                 masks = list(
                     map(lambda mem: 1 - float(mem.done), rollout_memories))
@@ -305,7 +306,7 @@ class ProximalPolicyOptimizer:
 
                 # Update data
                 self.live_reward_history.append(reward)
-                self.live_value_history.append(v_prediction.cpu().item())
+                self.live_value_history.append(v_prediction.item())
                 self.live_gae_history = returns
 
                 # Update the plots
@@ -618,7 +619,7 @@ if __name__ == "__main__":
         env_name="MineRLObtainDiamondShovel-v0",
         model="foundation-model-3x",
         weights="foundation-model-3x",
-        out_weights="ppo-zombie-hunter-1x",
+        out_weights="ppo-zombie-hunter-1x-test",
         save_every=5,
         num_envs=4,
         num_rollouts=500,
@@ -626,7 +627,7 @@ if __name__ == "__main__":
         epochs=4,
         minibatch_size=48,
         lr=2.5e-5,
-        weight_decay=0.04,
+        weight_decay=0.01,
         betas=(0.9, 0.999),
         beta_s=0.2,
         rho=0.2,
